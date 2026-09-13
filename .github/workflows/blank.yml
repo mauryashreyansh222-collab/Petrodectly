@@ -2,13 +2,18 @@ name: Continuous Persistent VPS
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 */6 * * *'
   workflow_dispatch:
+
+env:
+  RCLONE_CONFIG_GDRIVE_TYPE: drive
+  RCLONE_CONFIG_GDRIVE_SCOPE: drive
+  RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.RCLONE_DRIVE_TOKEN }}
 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repo
@@ -17,32 +22,28 @@ jobs:
       - name: Set hostname to biralo
         run: sudo hostnamectl set-hostname biralo
 
-      - name: Download VPS backup (if any)
+      - name: Install prerequisites + rclone
+        run: |
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Download Tailscale key backup (if any)
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: ./backup
         continue-on-error: true
 
-      - name: Install prerequisites
-        run: |
-          sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
-
-      - name: Install Tailscale official script
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Restore backup files
-        run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
-          else
-            echo "No backup found, starting fresh"
-          fi
-
       - name: Restore Tailscale state
         run: |
+          if [ -f ./backup/backup.zip ]; then
+            sudo unzip -o ./backup/backup.zip -d /
+          fi
           if [ -f /opt/vps-backup/data/tailscaled.state ]; then
             sudo mkdir -p /var/lib/tailscale
             sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
@@ -55,7 +56,7 @@ jobs:
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo
 
-      - name: Create user biralo with sudo
+      - name: Create user biralo
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
@@ -64,29 +65,87 @@ jobs:
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Start tmate session for SSH access
+      - name: Check Google Drive & restore Windows
+        run: |
+          if rclone lsf gdrive: --files-only | grep -qx "windows-backup.tar.gz"; then
+            echo "✅ Drive par backup mila! Download ho raha hai..."
+            rclone copy gdrive:windows-backup.tar.gz ./restore/ --progress
+            sudo mkdir -p /opt/windows
+            sudo tar -xzf ./restore/windows-backup.tar.gz -C /opt/
+            echo "✅ Windows restore complete!"
+          else
+            echo "⚠️ Drive par backup nahi mila — fresh Windows install hoga"
+          fi
+
+      - name: Pull Windows image
+        run: docker pull ghcr.io/dockur/windows
+
+      - name: Start Windows
+        run: |
+          docker run -d --name windows \
+            -e VERSION="11" \
+            -e USERNAME="admin" \
+            -e PASSWORD="Shrey222136" \
+            -e RAM_SIZE="8G" \
+            -e CPU_CORES="4" \
+            -e DISK_SIZE="64G" \
+            -p 3389:3389/tcp \
+            -p 3389:3389/udp \
+            -p 8006:8006 \
+            -v /opt/windows:/storage \
+            --device=/dev/kvm \
+            --cap-add NET_ADMIN \
+            ghcr.io/dockur/windows
+
+      - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
 
-      - name: Display connection details
+      - name: Show connection details
         run: |
           echo "🌐 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
+          tailscale ip -4 || echo "not found"
           echo ""
-          echo "🔍 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
+          echo "🔍 tmate SSH:"
+          cat $HOME/.tmate.sock/ssh || true
 
-      - name: Sleep to keep VPS alive
-        run: sleep 21600  # 6 hours
+      - name: Keep alive (5h 25m)
+        run: sleep 19500
 
-      - name: Backup VPS data and tailscale state
+      - name: Stop Windows cleanly
+        if: always()
+        run: |
+          sudo docker stop windows || true
+          sleep 20
+
+      - name: Backup Tailscale key
+        if: always()
         run: |
           sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || true
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
 
-      - name: Upload VPS backup artifact
+      - name: Upload Tailscale key artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
           path: backup.zip
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Backup Windows to Google Drive (auto, purana replace hoga)
+        if: always()
+        run: |
+          if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
+            echo "Windows backup ban raha hai..."
+            sudo tar -czf ~/windows-backup.tar.gz -C /opt windows
+            sudo chown $USER:$USER ~/windows-backup.tar.gz
+            echo "Google Drive par upload ho raha hai (purana backup replace hoga)..."
+            rclone copy ~/windows-backup.tar.gz gdrive: --progress
+            echo "Drive ka trash khali kar raha hai..."
+            rclone cleanup gdrive: || true
+            echo "✅ Drive backup complete!"
+          else
+            echo "Windows folder nahi mila, skip"
+          fi
