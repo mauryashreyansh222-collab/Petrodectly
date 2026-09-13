@@ -1,9 +1,17 @@
 name: Continuous Persistent VPS
 
+# FIX #1: sirf manual trigger. cron/schedule hata diya hai isliye
+# ab session khatam hote hi agla run apne aap chalu nahi hoga.
+# Jab tak tum khud "Run workflow" na dabao, kuch nahi chalega.
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
+
+# FIX #1 (part 2): agar galti se do baar "Run workflow" daba diya,
+# to dusra run pehle wale ke khatam hone tak QUEUE me rukega,
+# parallel me do sessions kabhi nahi chalenge.
+concurrency:
+  group: vps-session
+  cancel-in-progress: false
 
 env:
   RCLONE_CONFIG_GDRIVE_TYPE: drive
@@ -25,42 +33,47 @@ jobs:
       - name: Install prerequisites + rclone
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch iproute2
           curl https://rclone.org/install.sh | sudo bash
 
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Download Tailscale key backup (if any)
-        uses: actions/download-artifact@v4
-        with:
-          name: vps-backup
-          path: ./backup
-        continue-on-error: true
-
-      - name: Restore Tailscale state
+      # FIX #3: Tailscale state ab GitHub artifact (jo sirf 1 din tikta hai
+      # aur naye run me reliably nahi milta) ki jagah seedha Google Drive
+      # se restore hota hai — GH artifact ki tarah ye kabhi expire/miss
+      # nahi hoga, isliye same node = same Tailscale IP milega har baar.
+      - name: Restore Tailscale state from Drive
         run: |
-          if [ -f ./backup/backup.zip ]; then
-            sudo unzip -o ./backup/backup.zip -d /
-          fi
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+          mkdir -p ./restore
+          if rclone lsf gdrive: --files-only | grep -qx "tailscale-state.tar.gz"; then
+            echo "Tailscale state mila, restore kar rahe hain..."
+            rclone copy gdrive:tailscale-state.tar.gz ./restore/ --progress
             sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            sudo tar -xzf ./restore/tailscale-state.tar.gz -C /var/lib/tailscale/
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
+          else
+            echo "Pehli baar chal raha hai, koi purana state nahi mila"
           fi
 
       - name: Start Tailscale
         run: |
           sudo tailscaled &
           sleep 8
+          # --hostname same rakha, state restore ho chuka hai to
+          # Tailscale isi node ko continue karega -> same IP.
+          # NOTE: TAILSCALE_AUTHKEY reusable (non-ephemeral) key hona chahiye
+          # Tailscale admin console me, warna key expire hote hi naya node banega.
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo
+          echo "Tailscale IP:"
+          tailscale ip -4
 
       - name: Create user biralo
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
-            echo "biralo:biralo" | sudo chpasswd
+            echo "biralo:APNA_NAYA_PASSWORD_YAHAN" | sudo chpasswd
             sudo usermod -aG sudo biralo
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
@@ -80,15 +93,16 @@ jobs:
       - name: Pull Windows image
         run: docker pull ghcr.io/dockur/windows
 
+      # FIX #2 (specs): RAM 12G, cores 6, disk 100G kar diya
       - name: Start Windows
         run: |
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="Shrey222136" \
-            -e RAM_SIZE="8G" \
-            -e CPU_CORES="4" \
-            -e DISK_SIZE="64G" \
+            -e RAM_SIZE="12G" \
+            -e CPU_CORES="6" \
+            -e DISK_SIZE="100G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -p 8006:8006 \
@@ -108,8 +122,144 @@ jobs:
           echo "🔍 tmate SSH:"
           cat $HOME/.tmate.sock/ssh || true
 
-      - name: Keep alive (5h 25m)
-        run: sleep 19500
+      # FIX #2 (backup reliability): ab ek hi lamba "sleep" nahi hai.
+      # Loop chal raha hai jo har 35 minute me Windows + Tailscale state
+      # ka backup leke Drive par upload karta hai. Isliye agar beech me
+      # runner crash ho jaye, error aaye, ya cancel ho jaye, to zyada se
+      # zyada pichle 35 min ka hi data miss hoga — sab data nahi udega.
+      # trap laga hai jo cancel/error/timeout signal milte hi turant
+      # ek FINAL backup try karta hai (best-effort, kyunki timeout ke
+      # baad runner ke paas sirf kuch second hi hote hain).
+      - name: Keep alive with periodic backups
+        run: |
+          BACKUP_INTERVAL=2100   # 35 minute = 2100 sec
+          TOTAL_SECONDS=19500    # ~5h25m total session
+          ELAPSED=0
+
+          # Ek file ko upload karta hai aur VERIFY karta hai ki Drive par
+          # size match ho raha hai. Agar match nahi hua ya upload fail
+          # hua, to 3 baar tak retry karta hai (5 sec gap ke saath).
+          # Sirf tabhi "successful" bolta hai jab check pass ho.
+          upload_and_verify() {
+            LOCAL_FILE=$1
+            REMOTE_NAME=$2
+            ATTEMPT=1
+            MAX_ATTEMPTS=3
+
+            LOCAL_SIZE=$(stat -c%s "$LOCAL_FILE")
+
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+              echo "   Upload attempt $ATTEMPT/$MAX_ATTEMPTS: $REMOTE_NAME"
+              rclone copy "$LOCAL_FILE" gdrive: --progress
+
+              # rclone size command se Drive par actual size check karo
+              REMOTE_SIZE=$(rclone size gdrive:"$REMOTE_NAME" --json 2>/dev/null | grep -o '"bytes":[0-9]*' | grep -o '[0-9]*')
+
+              if [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ]; then
+                echo "   ✅ Verified: $REMOTE_NAME ($LOCAL_SIZE bytes match)"
+                return 0
+              else
+                echo "   ⚠️ Mismatch (local=$LOCAL_SIZE drive=$REMOTE_SIZE), retrying..."
+                ATTEMPT=$((ATTEMPT + 1))
+                sleep 5
+              fi
+            done
+
+            echo "   ❌ FAILED to verify upload of $REMOTE_NAME after $MAX_ATTEMPTS tries!"
+            return 1
+          }
+
+          backup_now() {
+            echo "🔄 Backup shuru ho raha hai... ($(date))"
+            OK=1
+
+            if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
+              sudo tar -czf ~/windows-backup.tar.gz -C /opt windows
+              sudo chown $USER:$USER ~/windows-backup.tar.gz
+              upload_and_verify ~/windows-backup.tar.gz windows-backup.tar.gz || OK=0
+            fi
+
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
+              sudo mkdir -p /tmp/ts-state
+              sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/
+              sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state .
+              sudo chown $USER:$USER ~/tailscale-state.tar.gz
+              upload_and_verify ~/tailscale-state.tar.gz tailscale-state.tar.gz || OK=0
+            fi
+
+            rclone cleanup gdrive: || true
+
+            if [ "$OK" = "1" ]; then
+              echo "✅ Backup complete aur VERIFIED ($(date))"
+            else
+              echo "❌ Backup me kuch verify nahi hua — agla cycle me phir try hoga ($(date))"
+            fi
+          }
+
+          # LOCK: agar timer-based aur RDP-disconnect-based backup ek
+          # saath trigger ho jaye, to dono ek time pe tar/upload na karein
+          # (isse file corrupt ho sakti hai). Ye lock ensure karta hai
+          # ki ek waqt me sirf EK backup chale.
+          LOCKFILE=/tmp/backup.lock
+
+          run_backup_safely() {
+            REASON=$1
+            if ( set -o noclobber; echo "$$" > "$LOCKFILE" ) 2>/dev/null; then
+              echo "🔔 Trigger: $REASON"
+              backup_now
+              rm -f "$LOCKFILE"
+            else
+              echo "⏭️ Backup already chal raha hai, skip ($REASON)"
+            fi
+          }
+
+          # Cancel / error / timeout aate hi ek aakhri backup try karo
+          trap 'echo "⚠️ Signal mila, emergency backup..."; run_backup_safely "shutdown signal"; exit 0' TERM INT
+
+          # ---- Background loop 1: har 35 min timer-based backup ----
+          (
+            ELAPSED=0
+            while [ $ELAPSED -lt $TOTAL_SECONDS ]; do
+              SLEEP_NOW=$BACKUP_INTERVAL
+              REMAINING=$((TOTAL_SECONDS - ELAPSED))
+              if [ $REMAINING -lt $BACKUP_INTERVAL ]; then
+                SLEEP_NOW=$REMAINING
+              fi
+              sleep $SLEEP_NOW
+              ELAPSED=$((ELAPSED + SLEEP_NOW))
+              run_backup_safely "35-min timer"
+            done
+          ) &
+          TIMER_PID=$!
+
+          # ---- Background loop 2: RDP (port 3389) disconnect detect ----
+          # Har 15 sec check karta hai ki koi RDP client connected hai ya nahi.
+          # Jab CONNECTED se DISCONNECTED me transition ho, backup trigger hota hai.
+          # 3 min ka cooldown hai taaki baar-baar connect/disconnect hone par
+          # backup spam na ho.
+          (
+            WAS_CONNECTED=0
+            COOLDOWN_UNTIL=0
+            NOW=0
+            while [ $NOW -lt $TOTAL_SECONDS ]; do
+              sleep 15
+              NOW=$((NOW + 15))
+              ACTIVE=$(ss -tn state established '( dport = :3389 or sport = :3389 )' 2>/dev/null | grep -c ESTAB || true)
+              if [ "$ACTIVE" -gt 0 ]; then
+                WAS_CONNECTED=1
+              elif [ "$WAS_CONNECTED" = "1" ]; then
+                # abhi disconnect hua hai
+                WAS_CONNECTED=0
+                if [ $NOW -ge $COOLDOWN_UNTIL ]; then
+                  run_backup_safely "RDP disconnect detected"
+                  COOLDOWN_UNTIL=$((NOW + 180))
+                fi
+              fi
+            done
+          ) &
+          MONITOR_PID=$!
+
+          wait $TIMER_PID $MONITOR_PID
 
       - name: Stop Windows cleanly
         if: always()
@@ -117,35 +267,21 @@ jobs:
           sudo docker stop windows || true
           sleep 20
 
-      - name: Backup Tailscale key
-        if: always()
-        run: |
-          sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || true
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
-
-      - name: Upload Tailscale key artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup
-          path: backup.zip
-          if-no-files-found: ignore
-          retention-days: 1
-
-      - name: Backup Windows to Google Drive (auto, purana replace hoga)
+      # Ye final backup ab safety-net hai — normal case me upar wale
+      # loop ne already sab kuch upload kar diya hoga.
+      - name: Final backup (safety net)
         if: always()
         run: |
           if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
-            echo "Windows backup ban raha hai..."
             sudo tar -czf ~/windows-backup.tar.gz -C /opt windows
             sudo chown $USER:$USER ~/windows-backup.tar.gz
-            echo "Google Drive par upload ho raha hai (purana backup replace hoga)..."
             rclone copy ~/windows-backup.tar.gz gdrive: --progress
-            echo "Drive ka trash khali kar raha hai..."
             rclone cleanup gdrive: || true
-            echo "✅ Drive backup complete!"
-          else
-            echo "Windows folder nahi mila, skip"
+          fi
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            sudo mkdir -p /tmp/ts-state
+            sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/
+            sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state .
+            sudo chown $USER:$USER ~/tailscale-state.tar.gz
+            rclone copy ~/tailscale-state.tar.gz gdrive: --progress
           fi
