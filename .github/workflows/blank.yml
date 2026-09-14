@@ -19,6 +19,11 @@ env:
   RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.RCLONE_DRIVE_TOKEN }}
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  # FIX: runner ka default time UTC hota hai, isliye Telegram messages
+  # me galat time dikh raha tha. TZ set karne se har "date" command
+  # automatically IST (India time) use karega, kisi line ko individually
+  # badalne ki zaroorat nahi.
+  TZ: Asia/Kolkata
 
 jobs:
   vps-session:
@@ -164,16 +169,19 @@ jobs:
             echo "✅ Drive par backup mila! Download ho raha hai..."
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" \
-              -d text="📦 Sir, your previous backup has been found on Drive. It will now be loaded — $(date '+%d-%m-%Y %I:%M %p')." > /dev/null || true
+              -d text="📦 Sir, your previous backup has been found on Drive. It is now being loaded — $(date '+%d-%m-%Y %I:%M %p')." > /dev/null || true
             rclone copy gdrive:windows-backup.tar.gz ./restore/ --progress
             sudo mkdir -p /opt/windows
             sudo tar -xzf ./restore/windows-backup.tar.gz -C /opt/
             echo "✅ Windows restore complete!"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="✅ Sir, your backup has been loaded successfully. Starting Windows now — $(date '+%d-%m-%Y %I:%M %p')." > /dev/null || true
           else
             echo "⚠️ Drive par backup nahi mila — fresh Windows install hoga"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" \
-              -d text="⚠️ Sir, no backup was found on Drive. A new Windows instance is being created — $(date '+%d-%m-%Y %I:%M %p')." > /dev/null || true
+              -d text="⚠️ Sir, no previous backup was found. A fresh Windows installation is starting now — this may take a while — $(date '+%d-%m-%Y %I:%M %p')." > /dev/null || true
           fi
 
       - name: Pull Windows image
@@ -185,7 +193,7 @@ jobs:
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="Shrey222136" \
-            -e RAM_SIZE="12G" \
+            -e RAM_SIZE="10G" \
             -e CPU_CORES="4" \
             -e DISK_SIZE="60G" \
             -p 3389:3389/tcp \
@@ -267,13 +275,52 @@ jobs:
             fi
           }
 
+          # Bade backup file (Windows wala) ke upload ka progress track
+          # karta hai — har 10% milestone par Telegram par percentage
+          # aur estimated time bhejta hai. rclone ke apne stats output
+          # se percentage/ETA nikalta hai.
+          upload_with_progress() {
+            LOCAL_FILE=$1
+            REMOTE_NAME=$2
+            LOGFILE=/tmp/rclone_progress.log
+            rm -f "$LOGFILE"
+
+            rclone copy "$LOCAL_FILE" gdrive: --stats-one-line --stats 10s --log-file="$LOGFILE" --log-level INFO &
+            RC_PID=$!
+            LAST_NOTIFIED=0
+
+            while kill -0 $RC_PID 2>/dev/null; do
+              sleep 10
+              if [ -f "$LOGFILE" ]; then
+                LAST_LINE=$(tail -1 "$LOGFILE" 2>/dev/null)
+                PCT=$(echo "$LAST_LINE" | grep -oE '[0-9]+%' | head -1 | tr -d '%')
+                ETA=$(echo "$LAST_LINE" | grep -oE 'ETA [^,]+' | head -1)
+                if [ -n "$PCT" ]; then
+                  THRESH=$(( (PCT / 10) * 10 ))
+                  if [ "$THRESH" -gt "$LAST_NOTIFIED" ] && [ "$THRESH" -ge 10 ] && [ "$THRESH" -le 90 ]; then
+                    notify_telegram "⬆️ Sir, your backup upload is at ${THRESH}% complete. ${ETA} — $(date '+%d-%m-%Y %I:%M %p')"
+                    LAST_NOTIFIED=$THRESH
+                  fi
+                fi
+              fi
+            done
+
+            wait $RC_PID
+            RC=$?
+            rm -f "$LOGFILE"
+            return $RC
+          }
+
           # Ek file ko upload karta hai aur VERIFY karta hai ki Drive par
           # size match ho raha hai. Agar match nahi hua ya upload fail
           # hua, to 3 baar tak retry karta hai (5 sec gap ke saath).
           # Sirf tabhi "successful" bolta hai jab check pass ho.
+          # 3rd argument "yes" pass karo to progress-tracking upload use hoga
+          # (badi file ke liye), warna normal plain upload hota hai.
           upload_and_verify() {
             LOCAL_FILE=$1
             REMOTE_NAME=$2
+            SHOW_PROGRESS=${3:-no}
             ATTEMPT=1
             MAX_ATTEMPTS=3
 
@@ -281,7 +328,11 @@ jobs:
 
             while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
               echo "   Upload attempt $ATTEMPT/$MAX_ATTEMPTS: $REMOTE_NAME"
-              rclone copy "$LOCAL_FILE" gdrive: --progress || true
+              if [ "$SHOW_PROGRESS" = "yes" ]; then
+                upload_with_progress "$LOCAL_FILE" "$REMOTE_NAME" || true
+              else
+                rclone copy "$LOCAL_FILE" gdrive: --progress || true
+              fi
 
               # rclone size command se Drive par actual size check karo
               REMOTE_SIZE=$(rclone size gdrive:"$REMOTE_NAME" --json 2>/dev/null | grep -o '"bytes":[0-9]*' | grep -o '[0-9]*') || REMOTE_SIZE=0
@@ -302,19 +353,29 @@ jobs:
 
           backup_now() {
             echo "🔄 Backup shuru ho raha hai... ($(date))"
+            notify_telegram "🔄 Sir, your backup is being taken now, please wait — $(date '+%d-%m-%Y %I:%M %p')."
             OK=1
 
             if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
-              sudo tar -czf ~/windows-backup.tar.gz -C /opt windows
-              sudo chown $USER:$USER ~/windows-backup.tar.gz
-              upload_and_verify ~/windows-backup.tar.gz windows-backup.tar.gz || OK=0
+              # Windows VM ko thodi der ke liye PAUSE kar rahe hain (freeze,
+              # stop nahi) taaki disk image file backup ke BEECH me change
+              # na ho — warna tar "file changed as we read it" bolke
+              # background loop hi crash kar deta tha (silently ruk jaata
+              # tha, agla koi backup kabhi nahi hota tha). Pause se RDP
+              # session bhi freeze ho jayega thodi der ke liye, phir wapas
+              # normal ho jayega jaise hi backup ka tar step khatam ho.
+              sudo docker pause windows 2>/dev/null || true
+              sudo tar -czf ~/windows-backup.tar.gz -C /opt windows || true
+              sudo docker unpause windows 2>/dev/null || true
+              sudo chown $USER:$USER ~/windows-backup.tar.gz 2>/dev/null || true
+              upload_and_verify ~/windows-backup.tar.gz windows-backup.tar.gz yes || OK=0
             fi
 
             if [ -f /var/lib/tailscale/tailscaled.state ]; then
               sudo mkdir -p /tmp/ts-state
-              sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/
-              sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state .
-              sudo chown $USER:$USER ~/tailscale-state.tar.gz
+              sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/ || true
+              sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state . || true
+              sudo chown $USER:$USER ~/tailscale-state.tar.gz 2>/dev/null || true
               upload_and_verify ~/tailscale-state.tar.gz tailscale-state.tar.gz || OK=0
             fi
 
@@ -381,7 +442,7 @@ jobs:
             while [ $NOW -lt $TOTAL_SECONDS ]; do
               sleep 15
               NOW=$((NOW + 15))
-              ACTIVE=$(ss -tn state established '( dport = :3389 or sport = :3389 )' 2>/dev/null | grep -c ESTAB || true)
+              ACTIVE=$(sudo ss -tn 2>/dev/null | grep ':3389' | grep -c ESTAB || true)
               if [ "$ACTIVE" -gt 0 ] && [ "$WAS_CONNECTED" = "0" ]; then
                 # abhi connect hua hai
                 WAS_CONNECTED=1
@@ -416,15 +477,15 @@ jobs:
         if: always()
         run: |
           if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
-            sudo tar -czf ~/windows-backup.tar.gz -C /opt windows
-            sudo chown $USER:$USER ~/windows-backup.tar.gz
-            rclone copy ~/windows-backup.tar.gz gdrive: --progress
+            sudo tar -czf ~/windows-backup.tar.gz -C /opt windows || true
+            sudo chown $USER:$USER ~/windows-backup.tar.gz 2>/dev/null || true
+            rclone copy ~/windows-backup.tar.gz gdrive: --progress || true
             rclone cleanup gdrive: || true
           fi
           if [ -f /var/lib/tailscale/tailscaled.state ]; then
             sudo mkdir -p /tmp/ts-state
-            sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/
-            sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state .
-            sudo chown $USER:$USER ~/tailscale-state.tar.gz
-            rclone copy ~/tailscale-state.tar.gz gdrive: --progress
+            sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/ || true
+            sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state . || true
+            sudo chown $USER:$USER ~/tailscale-state.tar.gz 2>/dev/null || true
+            rclone copy ~/tailscale-state.tar.gz gdrive: --progress || true
           fi
