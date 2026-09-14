@@ -185,9 +185,9 @@ jobs:
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="Shrey222136" \
-            -e RAM_SIZE="8G" \
+            -e RAM_SIZE="12G" \
             -e CPU_CORES="4" \
-            -e DISK_SIZE="30G" \
+            -e DISK_SIZE="60G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -p 8006:8006 \
