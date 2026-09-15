@@ -181,7 +181,7 @@ jobs:
           set -euo pipefail
           source /tmp/telegram-helper.sh
           telegram_send '💾 Step 4/6: Checking Google Drive for the Windows backup...'
-          sudo mkdir -p /opt /tmp/windows-restore
+          sudo mkdir -p /opt
           WIN_PATH=''
           while IFS= read -r p; do
             [ -n "$p" ] || continue
@@ -194,17 +194,19 @@ jobs:
 
           if [ -n "$WIN_PATH" ]; then
             echo 'WINDOWS_MODE=restore' >> "$GITHUB_ENV"
-            telegram_send '📦 Windows backup found. Restoring it; no fresh Windows installation will be used.'
-            rm -f /tmp/windows-restore/windows-backup.tar.gz
-            rclone copyto "gdrive:${WIN_PATH}" /tmp/windows-restore/windows-backup.tar.gz \
-              --stats 10s --stats-one-line --stats-log-level NOTICE \
-              --retries 5 --low-level-retries 20 --drive-chunk-size 64M >/tmp/win-restore.log 2>&1
-            test -s /tmp/windows-restore/windows-backup.tar.gz
+            telegram_send '📦 Windows backup found. Streaming it directly into /opt so no second huge local archive is needed.'
             sudo rm -rf /opt/windows
-            sudo tar -xzf /tmp/windows-restore/windows-backup.tar.gz -C /opt
-            sudo test -d /opt/windows
-            rm -f /tmp/windows-restore/windows-backup.tar.gz
-            telegram_send '✅ Windows backup restored successfully.'
+            sudo mkdir -p /opt
+            set +e
+            rclone cat "gdrive:${WIN_PATH}" | sudo tar -xzf - -C /opt
+            rc_rclone=${PIPESTATUS[0]}
+            rc_tar=${PIPESTATUS[1]}
+            set -e
+            if [ "$rc_rclone" -ne 0 ] || [ "$rc_tar" -ne 0 ] || [ ! -d /opt/windows ]; then
+              telegram_send '❌ Windows backup restore failed. The backup archive was not accepted as a valid Windows storage restore.'
+              exit 1
+            fi
+            telegram_send '✅ Windows backup streamed and restored successfully.'
           else
             echo 'WINDOWS_MODE=fresh' >> "$GITHUB_ENV"
             sudo rm -rf /opt/windows
@@ -308,13 +310,14 @@ jobs:
                 --drive-chunk-size 64M --retries 1 --low-level-retries 20 \
                 >/tmp/windows-backup-upload.log 2>&1
             rc=${PIPESTATUS[1]}
+            rc_tar=${PIPESTATUS[0]}
             set -e
 
             if [ "$paused" -eq 1 ]; then docker unpause windows >/dev/null 2>&1 || true; fi
 
-            if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -ne 0 ] || [ "$rc_tar" -ne 0 ]; then
               rclone deletefile "gdrive:${tmp_remote}" >/dev/null 2>&1 || true
-              telegram_send '❌ Windows backup upload failed. The previous good Google Drive backup was kept.' || true
+              telegram_send '❌ Windows backup upload/archive failed. The previous good Google Drive backup was kept.' || true
               rm -rf /tmp/windows-backup.lock
               return 1
             fi
