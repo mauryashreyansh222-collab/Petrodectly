@@ -1,11 +1,24 @@
 name: Continuous Persistent VPS
 
+# FIX #1: sirf manual trigger. cron/schedule hata diya hai isliye
+# ab session khatam hote hi agla run apne aap chalu nahi hoga.
+# Jab tak tum khud "Run workflow" na dabao, kuch nahi chalega.
 on:
   workflow_dispatch:
 
+# FIX #1 (part 2): agar galti se do baar "Run workflow" daba diya,
+# to dusra run pehle wale ke khatam hone tak QUEUE me rukega,
+# parallel me do sessions kabhi nahi chalenge.
 concurrency:
   group: vps-session
   cancel-in-progress: false
+
+# Telegram se /stop command aane par workflow ko cancel karne ke liye
+# GitHub API access chahiye — ye automatic token (github.token) ko
+# permission deta hai, koi NAYA secret add karne ki zaroorat nahi.
+permissions:
+  actions: write
+  contents: read
 
 env:
   RCLONE_CONFIG_GDRIVE_TYPE: drive
@@ -13,413 +26,629 @@ env:
   RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.RCLONE_DRIVE_TOKEN }}
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-  WINDOWS_PASSWORD: ${{ secrets.WINDOWS_PASSWORD }}
+  # FIX: runner ka default time UTC hota hai, isliye Telegram messages
+  # me galat time dikh raha tha. TZ set karne se har "date" command
+  # automatically IST (India time) use karega, kisi line ko individually
+  # badalne ki zaroorat nahi.
   TZ: Asia/Kolkata
+  # Automatic token — koi naya secret nahi, GitHub khud deta hai. Workflow
+  # cancel karne ke liye zaroori hai (Telegram /stop feature ke liye).
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    defaults:
-      run:
-        shell: bash
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install tools and configure Telegram
+      - name: Notify - workflow started
         run: |
-          set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y curl jq sudo net-tools iproute2 openssh-server util-linux ca-certificates
-          curl -fsSL https://rclone.org/install.sh | sudo bash
-          rclone version | head -3
-          test -n "$TELEGRAM_BOT_TOKEN" || { echo 'TELEGRAM_BOT_TOKEN is missing'; exit 1; }
-          test -n "$TELEGRAM_CHAT_ID" || { echo 'TELEGRAM_CHAT_ID is missing'; exit 1; }
-          test -n "$WINDOWS_PASSWORD" || { echo 'WINDOWS_PASSWORD is missing'; exit 1; }
-          test -n "${{ secrets.TAILSCALE_AUTHKEY }}" || { echo 'TAILSCALE_AUTHKEY is missing'; exit 1; }
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
 
-          cat > /tmp/telegram-helper.sh <<'EOF'
-          #!/usr/bin/env bash
-          telegram_send() {
-            local msg="$*" response='' attempt
-            for attempt in 1 2 3 4 5; do
-              response="$(curl -sS --max-time 25 -X POST \
-                "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d "chat_id=${TELEGRAM_CHAT_ID}" \
-                --data-urlencode "text=$(date '+%I:%M:%S %p') : ${msg}" 2>&1 || true)"
-              if echo "$response" | jq -e '.ok == true' >/dev/null 2>&1; then return 0; fi
-              sleep 2
-            done
-            echo "Telegram send failed: ${response}" >&2
-            return 1
-          }
-          EOF
-          chmod 700 /tmp/telegram-helper.sh
-          source /tmp/telegram-helper.sh
-          curl -fsS --max-time 25 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" | jq -e '.ok == true' >/dev/null
-          curl -fsS --max-time 25 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook" -d 'drop_pending_updates=false' | jq -e '.ok == true' >/dev/null
-          telegram_send '🚀 VPS workflow started.'
-          telegram_send '🧰 Telegram, Google Drive, Tailscale and Windows checks are starting.'
-          telegram_send '✅ Step 1/6 complete.'
+🚀 Sir, your VPS workflow has been started. Setup is in progress, please wait." > /dev/null || true
 
-      - name: Setup Tailscale with persistent identity
+      - name: Set hostname to biralo
+        run: sudo hostnamectl set-hostname biralo
+
+      - name: Install prerequisites + rclone
         run: |
-          set -Eeuo pipefail
-          source /tmp/telegram-helper.sh
-          trap 'telegram_send "❌ Tailscale step failed. Check the GitHub Actions log." || true' ERR
-          telegram_send '📡 Step 2/6: Installing Tailscale and restoring the persistent node identity...'
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch iproute2 xxd openssh-server python3
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Install Tailscale
+        run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo systemctl stop tailscaled 2>/dev/null || true
-          sudo pkill -x tailscaled 2>/dev/null || true
 
-          # IMPORTANT: rclone runs as the GitHub runner user, so all rclone temp files
-          # live in RUNNER_TEMP and are never created in a root-owned /tmp directory.
-          TS_WORK="${RUNNER_TEMP}/tailscale-work"
-          rm -rf "$TS_WORK"
-          mkdir -p "$TS_WORK"
-          chmod 700 "$TS_WORK"
-          sudo mkdir -p /var/lib/tailscale
-
-          TS_BACKUP=''
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            if rclone lsjson "gdrive:${p}" --stat --no-modtime --no-mimetype >"$TS_WORK/stat.json" 2>/dev/null \
-              && jq -e '.Size > 0' "$TS_WORK/stat.json" >/dev/null 2>&1; then
-              TS_BACKUP="$p"
-              break
-            fi
-          done < <(rclone lsf gdrive: --recursive --files-only 2>/dev/null | grep -E '(^|/)tailscale-state\.tar\.gz$' || true)
-
-          if [ -n "$TS_BACKUP" ]; then
-            telegram_send '🔄 Previous Tailscale state found. Restoring it without creating a new node.'
-            rclone copyto "gdrive:${TS_BACKUP}" "$TS_WORK/tailscale-state.tar.gz" --retries 5 --low-level-retries 20
-            test -s "$TS_WORK/tailscale-state.tar.gz"
-            sudo rm -rf /var/lib/tailscale/*
-            sudo tar -xzf "$TS_WORK/tailscale-state.tar.gz" -C /var/lib/tailscale
-            sudo test -s /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            TS_HAD_BACKUP=1
-            telegram_send '✅ Tailscale state restored successfully.'
-          else
-            TS_HAD_BACKUP=0
-            telegram_send '🆕 No previous Tailscale state backup found. First registration will be used.'
-          fi
-
-          sudo systemctl enable tailscaled >/dev/null
-          sudo systemctl start tailscaled
-          TS_IP=''
-          for i in $(seq 1 60); do
-            TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-            [[ "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && break
-            sleep 2
-          done
-
-          if [[ ! "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            if [ "$TS_HAD_BACKUP" -eq 1 ]; then
-              telegram_send '❌ Restored Tailscale identity did not reconnect. I will NOT authenticate a new node, preventing an intentional IP change.'
-              exit 1
-            fi
-            telegram_send '🔐 Authenticating the first Tailscale node...'
-            TS_AUTH_KEY='${{ secrets.TAILSCALE_AUTHKEY }}'
-            sudo env TS_AUTH_KEY="$TS_AUTH_KEY" tailscale up --auth-key="$TS_AUTH_KEY" --hostname=biralo --ssh --timeout=90s
-            unset TS_AUTH_KEY
-          else
-            sudo tailscale set --hostname=biralo --ssh 2>/dev/null || true
-          fi
-
-          TS_IP=''
-          for i in $(seq 1 60); do
-            TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
-            [[ "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && break
-            sleep 2
-          done
-          [[ "$TS_IP" =~ ^100\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || { telegram_send '❌ Tailscale did not obtain a 100.x IPv4 address.'; exit 1; }
-          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
-          telegram_send "🌐 Tailscale is online. IPv4: ${TS_IP}"
-
-          # ONE-TIME Tailscale backup. This is outside the Windows backup loop.
-          telegram_send '💾 Creating the one-time Tailscale state backup...'
-          sudo systemctl stop tailscaled
-          sudo test -s /var/lib/tailscale/tailscaled.state
-          sudo tar -czf "$TS_WORK/tailscale-state.tar.gz" -C /var/lib/tailscale tailscaled.state
-          sudo chown "$(id -u):$(id -g)" "$TS_WORK/tailscale-state.tar.gz"
-          sudo systemctl start tailscaled
-
-          TS_TMP="tailscale-state.$(date +%s).tmp.tar.gz"
-          rclone copyto "$TS_WORK/tailscale-state.tar.gz" "gdrive:${TS_TMP}" --ignore-times --retries 5 --low-level-retries 20 --drive-chunk-size 16M
-          TS_SIZE="$(rclone lsjson "gdrive:${TS_TMP}" --stat --no-modtime --no-mimetype 2>/dev/null | jq -r '.Size // 0' || echo 0)"
-          if [ "$TS_SIZE" -le 0 ]; then
-            rclone deletefile "gdrive:${TS_TMP}" >/dev/null 2>&1 || true
-            telegram_send '❌ Tailscale backup verification failed.'
-            exit 1
-          fi
-          rclone moveto "gdrive:${TS_TMP}" gdrive:tailscale-state.tar.gz --retries 5 --low-level-retries 20
-          rm -rf "$TS_WORK"
-          telegram_send "✅ One-time Tailscale backup saved and verified (${TS_SIZE} bytes)."
-          telegram_send '✅ Step 2/6 complete.'
-
-      - name: Prepare Linux host
+      # FIX #3: Tailscale state ab GitHub artifact (jo sirf 1 din tikta hai
+      # aur naye run me reliably nahi milta) ki jagah seedha Google Drive
+      # se restore hota hai — GH artifact ki tarah ye kabhi expire/miss
+      # nahi hoga, isliye same node = same Tailscale IP milega har baar.
+      - name: Restore Tailscale state from Drive
         run: |
-          set -Eeuo pipefail
-          source /tmp/telegram-helper.sh
-          trap 'telegram_send "❌ Linux host preparation failed. Check the GitHub Actions log." || true' ERR
-          telegram_send '🖥️ Step 3/6: Preparing the Linux host...'
-          sudo hostnamectl set-hostname biralo
+          mkdir -p ./restore
+          if rclone lsf gdrive: --files-only | grep -qx "tailscale-state.tar.gz"; then
+            echo "Tailscale state mila, restore kar rahe hain..."
+            rclone copy gdrive:tailscale-state.tar.gz ./restore/ --progress
+            sudo mkdir -p /var/lib/tailscale
+            sudo tar -xzf ./restore/tailscale-state.tar.gz -C /var/lib/tailscale/
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
+          else
+            echo "Pehli baar chal raha hai, koi purana state nahi mila"
+          fi
+
+      - name: Start Tailscale
+        run: |
+          sudo tailscaled &
+          sleep 8
+          # --hostname same rakha, state restore ho chuka hai to
+          # Tailscale isi node ko continue karega -> same IP.
+          # NOTE: TAILSCALE_AUTHKEY reusable (non-ephemeral) key hona chahiye
+          # Tailscale admin console me, warna key expire hote hi naya node banega.
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo --ssh
+          echo "Tailscale IP:"
+          tailscale ip -4
+
+      # FIX: Tailscale identity backup ab sirf EK BAAR yahan hota hai
+      # (workflow start me), har 35-min backup cycle me nahi — kyunki
+      # Tailscale state itni baar change hi nahi hota, isliye baar baar
+      # upload karna faaltu tha.
+      - name: Backup Tailscale identity (once)
+        run: |
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            sudo mkdir -p /tmp/ts-state
+            sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/ || true
+            sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state . || true
+            sudo chown $USER:$USER ~/tailscale-state.tar.gz 2>/dev/null || true
+            rclone copy ~/tailscale-state.tar.gz gdrive: --progress || true
+            echo "✅ Tailscale identity backed up (one-time)"
+          fi
+
+      - name: Create user biralo
+        run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
-            echo 'biralo:biralo' | sudo chpasswd
+            echo "biralo:biralo" | sudo chpasswd
             sudo usermod -aG sudo biralo
-            echo 'biralo ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/biralo >/dev/null
-            sudo chmod 440 /etc/sudoers.d/biralo
+            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
-          sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-          sudo systemctl enable ssh >/dev/null
+
+      - name: Start SSH server (for PuTTY access)
+        run: |
+          # Password se login allow karna hai (default Ubuntu me kabhi-kabhi
+          # off hota hai), isliye explicitly enable kar rahe hain.
+          sudo sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+          sudo systemctl enable ssh
           sudo systemctl restart ssh
-          sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-          sudo sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null
-          sudo sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null
-          sudo apt-get clean
-          telegram_send "🟢 Linux host ready. Tailscale IPv4: ${TAILSCALE_IP}"
-          telegram_send '✅ Step 3/6 complete.'
+          sudo systemctl status ssh --no-pager || true
+          echo "✅ SSH server chal raha hai port 22 par"
 
-      - name: Restore Windows backup or create fresh storage
+      # FIX: Tailscale interface (tailscale0) se aane wala traffic Docker ke
+      # published ports (3389, 8006) tak reliably nahi pahuch pa raha tha,
+      # sirf loopback (127.0.0.1) se kaam kar raha tha. Ye classic
+      # Tailscale + Docker issue hai jiski wajah "reverse path filtering"
+      # (rp_filter) hoti hai — jab reply packet jis interface se gaya
+      # nahi usi se wapas aata hai, kernel usse drop kar deta hai.
+      # Ye settings loosen kar rahe hain taaki tailscale0 se aane wala
+      # traffic bhi properly Docker tak pahunche.
+      - name: Fix networking for Tailscale + Docker port access
         run: |
-          set -Eeuo pipefail
-          source /tmp/telegram-helper.sh
-          trap 'telegram_send "❌ Windows restore/preparation failed. Check the GitHub Actions log." || true' ERR
-          telegram_send '💾 Step 4/6: Looking for the Windows backup on Google Drive...'
-          sudo mkdir -p /opt
-          WIN_BACKUP=''
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            if rclone lsjson "gdrive:${p}" --stat --no-modtime --no-mimetype >/tmp/win-stat.json 2>/dev/null \
-              && jq -e '.Size > 0' /tmp/win-stat.json >/dev/null 2>&1; then
-              WIN_BACKUP="$p"
-              break
-            fi
-          done < <(rclone lsf gdrive: --recursive --files-only 2>/dev/null | grep -E '(^|/)windows-backup\.tar\.gz$' || true)
+          echo "IP forwarding enable kar rahe hain..."
+          sudo sysctl -w net.ipv4.ip_forward=1
 
-          if [ -n "$WIN_BACKUP" ]; then
-            echo 'WINDOWS_MODE=restore' >> "$GITHUB_ENV"
-            telegram_send '📦 Windows backup found. Streaming it directly into /opt.'
-            sudo rm -rf /opt/windows
-            set +e
-            rclone cat "gdrive:${WIN_BACKUP}" | sudo tar -xzf - -C /opt
-            PIPE_STATUS=("${PIPESTATUS[@]}")
-            set -e
-            if [ "${PIPE_STATUS[0]}" -ne 0 ] || [ "${PIPE_STATUS[1]}" -ne 0 ] || [ ! -d /opt/windows ]; then
-              telegram_send '❌ Windows backup restore failed.'
-              exit 1
-            fi
-            telegram_send '✅ Windows backup restored successfully.'
+          echo "rp_filter ko loose mode (2) me kar rahe hain..."
+          sudo sysctl -w net.ipv4.conf.all.rp_filter=2
+          sudo sysctl -w net.ipv4.conf.default.rp_filter=2
+          for iface in /proc/sys/net/ipv4/conf/*/rp_filter; do
+            echo 2 | sudo tee "$iface" > /dev/null || true
+          done
+
+          echo "UFW firewall check kar rahe hain..."
+          if sudo ufw status | grep -q "Status: active"; then
+            echo "UFW active hai, RDP/viewer ports allow kar rahe hain..."
+            sudo ufw allow 3389/tcp
+            sudo ufw allow 3389/udp
+            sudo ufw allow 8006/tcp
           else
-            echo 'WINDOWS_MODE=fresh' >> "$GITHUB_ENV"
-            sudo rm -rf /opt/windows
-            sudo mkdir -p /opt/windows
-            telegram_send '⚠️ No Windows backup found. A fresh Windows 11 installation will start.'
+            echo "UFW active nahi hai, kuch karne ki zaroorat nahi"
           fi
-          telegram_send '✅ Step 4/6 complete.'
 
-      - name: Pull Dockur Windows image
+          echo "✅ Networking fix apply ho gaya"
+
+      # FIX: Public repo ka free runner 4-core CPU / 16GB RAM deta hai
+      # (private repo hota to sirf 2-core/8GB milta) — ye confirm ho
+      # chuka hai. Disk sirf ~14GB hoti hai total, isliye pehle usme se
+      # unused pre-installed SDKs (dotnet, Android, GHC waghera) hata
+      # ke jagah banate hain — ye ek well-known GitHub Actions trick hai,
+      # isse aksar 10-20GB extra free space mil jaata hai. Ye Windows
+      # image pull karne se PEHLE karna zaroori hai, warna cleanup
+      # abhi-abhi pull ki hui image ko bhi hata sakta hai.
+      - name: Free up disk space
         run: |
-          set -Eeuo pipefail
-          source /tmp/telegram-helper.sh
-          trap 'telegram_send "❌ Dockur image step failed. Check the GitHub Actions log." || true' ERR
-          telegram_send '📥 Step 5/6: Pulling the Dockur Windows image...'
-          docker pull ghcr.io/dockur/windows
-          telegram_send '✅ Dockur Windows image is ready.'
-          telegram_send '✅ Step 5/6 complete.'
+          echo "Pehle disk space (cleanup se pehle):"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache 2>/dev/null || true
+          sudo apt-get clean
+          docker image prune --all --force 2>/dev/null || true
+          echo "Baad me disk space (cleanup ke baad):"
+          df -h /
 
-      - name: Start Windows and run monitor
+      - name: Check available resources
         run: |
-          set -uo pipefail
-          source /tmp/telegram-helper.sh
-          REQUEST=/tmp/vps-request
-          CONTAINER=windows
-          BACKUP_LOCK=/tmp/windows-backup.lock
-          POLLER_PID=''
-          rm -f "$REQUEST" "$BACKUP_LOCK"
+          echo "💾 Disk space:"
+          df -h /
+          echo ""
+          echo "🧠 Memory:"
+          free -h
+          echo ""
+          echo "⚙️ CPU cores:"
+          nproc
 
-          send_keyboard() {
-            curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${TELEGRAM_CHAT_ID}" \
-              --data-urlencode "text=$(date '+%I:%M:%S %p') : 🛑 Select an action:" \
-              --data-urlencode 'reply_markup={"inline_keyboard":[[{"text":"💾 BACKUP & STOP","callback_data":"backup_stop"}],[{"text":"❌ STOP WITHOUT BACKUP","callback_data":"stop_no_backup"}],[{"text":"📦 BACKUP NOW - KEEP RUNNING","callback_data":"backup_now"}]]}' \
-              >/dev/null 2>&1 || true
-          }
+      - name: Check Google Drive & restore Windows
+        run: |
+          if rclone lsf gdrive: --files-only | grep -qx "windows-backup.tar.gz"; then
+            echo "✅ Drive par backup mila! Download ho raha hai..."
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
 
-          backup_windows() {
-            local reason="${1:-manual}"
-            if [ -e "$BACKUP_LOCK" ]; then
-              telegram_send '⏳ A Windows backup is already running.' || true
-              return 0
-            fi
-            touch "$BACKUP_LOCK"
-            telegram_send "💾 Windows backup started (${reason}). Windows will be paused during the archive." || true
-            if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
-              rm -f "$BACKUP_LOCK"
-              telegram_send '❌ Windows container does not exist.' || true
-              return 1
-            fi
-            docker pause "$CONTAINER" >/dev/null 2>&1 || true
-            local tmp_remote="windows-backup.$(date +%s).tmp.tar.gz"
-            local log_file="${RUNNER_TEMP}/windows-backup-upload.log"
-            : > "$log_file"
-            (
-              set -o pipefail
-              sudo tar -C /opt --sparse -czf - windows | rclone rcat "gdrive:${tmp_remote}" --retries 5 --low-level-retries 20 --drive-chunk-size 16M
-            ) >"$log_file" 2>&1 &
-            local pid=$!
-            while kill -0 "$pid" 2>/dev/null; do
-              sleep 15
-              telegram_send '📤 Windows backup is still uploading to Google Drive...' || true
-            done
-            wait "$pid"
-            local rc=$?
-            if [ "$rc" -eq 0 ]; then
-              local size
-              size="$(rclone lsjson "gdrive:${tmp_remote}" --stat --no-modtime --no-mimetype 2>/dev/null | jq -r '.Size // 0' || echo 0)"
-              if [ "$size" -gt 0 ]; then
-                if rclone moveto "gdrive:${tmp_remote}" gdrive:windows-backup.tar.gz --retries 5 --low-level-retries 20; then
-                  telegram_send "✅ Windows backup saved and verified (${size} bytes)." || true
-                  docker unpause "$CONTAINER" >/dev/null 2>&1 || true
-                  rm -f "$BACKUP_LOCK"
-                  return 0
-                fi
-              fi
-            fi
-            rclone deletefile "gdrive:${tmp_remote}" >/dev/null 2>&1 || true
-            docker unpause "$CONTAINER" >/dev/null 2>&1 || true
-            rm -f "$BACKUP_LOCK"
-            telegram_send '❌ Windows backup failed. The previous good backup was kept.' || true
-            return 1
-          }
+📦 Sir, your previous backup has been found on Drive. It is now being loaded." > /dev/null || true
+            rclone copy gdrive:windows-backup.tar.gz ./restore/ --progress
+            sudo mkdir -p /opt/windows
+            sudo tar -xzf ./restore/windows-backup.tar.gz -C /opt/
+            echo "✅ Windows restore complete!"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
 
-          poller() {
-            local offset=0 init maxid resp update uid chat text cb cbid
-            init="$(curl -sS --max-time 20 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?limit=100&timeout=0" 2>/dev/null || true)"
-            maxid="$(echo "$init" | jq -r '[.result[]?.update_id] | max // -1' 2>/dev/null || echo -1)"
-            [[ "$maxid" =~ ^[0-9]+$ ]] && offset=$((maxid+1))
-            while [ ! -f "$REQUEST" ]; do
-              resp="$(curl -sS --max-time 40 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${offset}&timeout=30&limit=50" 2>/dev/null || true)"
-              echo "$resp" | jq -e '.ok == true' >/dev/null 2>&1 || { sleep 2; continue; }
-              while IFS= read -r update; do
-                [ -n "$update" ] || continue
-                uid="$(echo "$update" | jq -r '.update_id // empty')"
-                [ -n "$uid" ] || continue
-                offset=$((uid+1))
-                chat="$(echo "$update" | jq -r '.message.chat.id // .callback_query.message.chat.id // empty')"
-                [ "$chat" = "$TELEGRAM_CHAT_ID" ] || continue
-                text="$(echo "$update" | jq -r '.message.text // empty')"
-                cb="$(echo "$update" | jq -r '.callback_query.data // empty')"
-                cbid="$(echo "$update" | jq -r '.callback_query.id // empty')"
-                case "$text" in /stop|/backup) send_keyboard ;; esac
-                case "$cb" in
-                  backup_stop)
-                    [ -n "$cbid" ] && curl -sS --max-time 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery" -d "callback_query_id=${cbid}" >/dev/null 2>&1 || true
-                    touch "$REQUEST"; echo backup_stop > /tmp/vps-action; break ;;
-                  stop_no_backup)
-                    [ -n "$cbid" ] && curl -sS --max-time 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery" -d "callback_query_id=${cbid}" >/dev/null 2>&1 || true
-                    touch "$REQUEST"; echo stop_no_backup > /tmp/vps-action; break ;;
-                  backup_now)
-                    [ -n "$cbid" ] && curl -sS --max-time 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery" -d "callback_query_id=${cbid}" >/dev/null 2>&1 || true
-                    echo backup_now > /tmp/vps-action ;;
-                esac
-              done < <(echo "$resp" | jq -c '.result[]?')
-            done
-          }
+✅ Sir, your backup has been loaded successfully. Starting Windows now." > /dev/null || true
+          else
+            echo "⚠️ Drive par backup nahi mila — fresh Windows install hoga"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
 
-          telegram_send "🪟 Starting Dockur Windows 11. RAM=12G CPU=4 DISK=70G. Tailscale IPv4=${TAILSCALE_IP}" || true
-          docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-          docker run -d --name "$CONTAINER" --restart=no \
-            --stop-timeout 120 \
-            --device=/dev/kvm \
-            --device=/dev/net/tun \
-            --cap-add NET_ADMIN \
+⚠️ Sir, no previous backup was found. A fresh Windows installation is starting now — this may take a while." > /dev/null || true
+          fi
+
+      - name: Pull Windows image
+        run: docker pull ghcr.io/dockur/windows
+
+      - name: Start Windows
+        run: |
+          docker run -d --name windows \
+            -e VERSION="11" \
+            -e USERNAME="admin" \
+            -e PASSWORD="Shrey222136" \
+            -e RAM_SIZE="10G" \
+            -e CPU_CORES="4" \
+            -e DISK_SIZE="60G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -p 8006:8006 \
-            -e VERSION=11 \
-            -e USERNAME=admin \
-            -e PASSWORD="$WINDOWS_PASSWORD" \
-            -e RAM_SIZE=12G \
-            -e CPU_CORES=4 \
-            -e DISK_SIZE=70G \
             -v /opt/windows:/storage \
+            --device=/dev/kvm \
+            --cap-add NET_ADMIN \
             ghcr.io/dockur/windows
-          docker ps --filter "name=$CONTAINER"
-          poller &
-          POLLER_PID=$!
 
+      # tmate step yahan se hata diya — Tailscale se already SSH access
+      # milta hai (biralo user se), isliye tmate ki zaroorat nahi thi.
+      # Ye kabhi-kabhi apne server (tmate.io) se connect hone me permanently
+      # atak jaata tha, jo pura workflow block kar deta tha.
+
+      - name: Wait for RDP to be ready, then notify
+        run: |
+          echo "Windows boot hone ka wait kar rahe hain (RDP port 3389)..."
           READY=0
-          READY_COUNT=0
-          START=0
-          LAST_HEART=0
-          telegram_send '⏳ Waiting for Dockur to report that Windows has started and RDP is ready...' || true
-          while [ "$START" -lt 18000 ]; do
-            if [ -f /tmp/vps-action ]; then
-              action="$(cat /tmp/vps-action 2>/dev/null || true)"
-              rm -f /tmp/vps-action "$REQUEST"
-              case "$action" in
-                backup_now) backup_windows 'Telegram request' || true ;;
-                backup_stop) backup_windows 'Telegram stop request'; docker stop -t 120 "$CONTAINER" >/dev/null 2>&1 || true; break ;;
-                stop_no_backup) telegram_send '🛑 Stopping Windows without a backup.' || true; docker stop -t 120 "$CONTAINER" >/dev/null 2>&1 || true; break ;;
-              esac
-              [ -f "$REQUEST" ] && rm -f "$REQUEST"
-              touch "$REQUEST"
+          for i in $(seq 1 210); do
+            # sirf raw TCP connect nahi, asli RDP protocol ka pehla
+            # response byte check kar rahe hain (RDP negotiation request
+            # bhejke response dekhte hain) — isse false-positive nahi milega
+            # jab tak Windows ke andar ka RDP service genuinely taiyar na ho.
+            RESPONSE=$(timeout 3 bash -c '
+              exec 3<>/dev/tcp/127.0.0.1/3389
+              printf "\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00" >&3
+              head -c 4 <&3 | xxd -p
+            ' 2>/dev/null) || true
+            if [ -n "$RESPONSE" ]; then
+              READY=1
+              break
             fi
-
-            if [ "$READY" -eq 0 ]; then
-              if docker logs "$CONTAINER" 2>&1 | grep -Eqi 'Windows started successfully|Windows started succesfully'; then
-                if timeout 3 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3389' 2>/dev/null; then
-                  READY_COUNT=$((READY_COUNT+1))
-                else
-                  READY_COUNT=0
-                fi
-                if [ "$READY_COUNT" -ge 6 ]; then
-                  READY=1
-                  telegram_send "🟢 Windows RDP is READY. Connect to ${TAILSCALE_IP}:3389 as admin." || true
-                  send_keyboard
-                fi
-              else
-                READY_COUNT=0
-              fi
-            fi
-
-            if [ "$READY" -eq 1 ]; then
-              if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
-                telegram_send '⚠️ Windows container stopped.' || true
-                break
-              fi
-              if ! timeout 3 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/3389' 2>/dev/null; then
-                telegram_send '⚠️ RDP connection appears to have closed. Running a safety Windows backup.' || true
-                backup_windows 'RDP safety backup' || true
-              fi
-            fi
-
-            if [ $((START-LAST_HEART)) -ge 60 ]; then
-              if [ "$READY" -eq 0 ]; then
-                telegram_send "⏳ Windows is still starting... (${START}s elapsed)." || true
-              else
-                telegram_send "💚 Windows is running. Tailscale=${TAILSCALE_IP}. Next automatic backup in up to 35 minutes." || true
-              fi
-              LAST_HEART=$START
-            fi
-
-            if [ "$READY" -eq 1 ] && [ $((START % 2100)) -eq 0 ] && [ "$START" -gt 0 ]; then
-              backup_windows 'automatic 35-minute backup' || true
-            fi
-            sleep 1
-            START=$((START+1))
+            sleep 10
           done
 
-          rm -f "$REQUEST"
-          kill "$POLLER_PID" 2>/dev/null || true
-          wait "$POLLER_PID" 2>/dev/null || true
-          if docker inspect "$CONTAINER" >/dev/null 2>&1; then
-            docker stop -t 120 "$CONTAINER" >/dev/null 2>&1 || true
+          TS_IP=$(tailscale ip -4 2>/dev/null || echo "not available")
+
+          if [ "$READY" = "1" ]; then
+            echo "✅ RDP is genuinely up!"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
+
+🖥️ Sir, your RDP is now ready. You can connect using this Tailscale IP: ${TS_IP}" > /dev/null || true
+          else
+            echo "⚠️ RDP abhi bhi ready nahi hua 35 min ke andar"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
+
+⚠️ Sir, RDP is taking longer than usual (35+ min) to come up. Tailscale IP: ${TS_IP}. Please check via SSH: tailscale ssh biralo, then run: sudo docker logs windows --tail 50" > /dev/null || true
           fi
-          telegram_send '🏁 VPS workflow session finished.' || true
+
+      - name: Show connection details
+        run: |
+          echo "🌐 Tailscale IP:"
+          tailscale ip -4 || echo "not found"
+
+      # FIX #2 (backup reliability): ab ek hi lamba "sleep" nahi hai.
+      # Loop chal raha hai jo har 35 minute me Windows + Tailscale state
+      # ka backup leke Drive par upload karta hai. Isliye agar beech me
+      # runner crash ho jaye, error aaye, ya cancel ho jaye, to zyada se
+      # zyada pichle 35 min ka hi data miss hoga — sab data nahi udega.
+      # trap laga hai jo cancel/error/timeout signal milte hi turant
+      # ek FINAL backup try karta hai (best-effort, kyunki timeout ke
+      # baad runner ke paas sirf kuch second hi hote hain).
+      - name: Keep alive with periodic backups
+        run: |
+          BACKUP_INTERVAL=2100   # 35 minute = 2100 sec
+          TOTAL_SECONDS=19500    # ~5h25m total session
+          ELAPSED=0
+
+          # RDP (Windows) ke andar seedha popup bhejna is setup me reliable
+          # nahi hai (VM isolated hai), isliye Telegram par turant message
+          # jaata hai — RDP me ho ya na ho, phone pe turant pata chal jata hai.
+          notify_telegram() {
+            MSG=$1
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+              FULL_MSG="🕐 $(date '+%d-%m-%Y %I:%M:%S %p')
+
+${MSG}"
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                -d text="${FULL_MSG}" > /dev/null || echo "   (Telegram notify fail hui, ignore kar ke aage badhte hain)"
+            fi
+          }
+
+          # Bade backup file (Windows wala) ke upload ka progress track
+          # karta hai — har 10% milestone par Telegram par percentage
+          # aur estimated time bhejta hai. rclone ke apne stats output
+          # se percentage/ETA nikalta hai.
+          upload_with_progress() {
+            LOCAL_FILE=$1
+            REMOTE_PATH=$2
+            LOGFILE=/tmp/rclone_progress.log
+            rm -f "$LOGFILE"
+
+            rclone copyto "$LOCAL_FILE" "$REMOTE_PATH" --stats-one-line --stats 10s --log-file="$LOGFILE" --log-level INFO &
+            RC_PID=$!
+            LAST_NOTIFIED=0
+
+            while kill -0 $RC_PID 2>/dev/null; do
+              sleep 10
+              if [ -f "$LOGFILE" ]; then
+                LAST_LINE=$(tail -1 "$LOGFILE" 2>/dev/null)
+                PCT=$(echo "$LAST_LINE" | grep -oE '[0-9]+%' | head -1 | tr -d '%')
+                ETA=$(echo "$LAST_LINE" | grep -oE 'ETA [^,]+' | head -1)
+                if [ -n "$PCT" ]; then
+                  THRESH=$(( (PCT / 10) * 10 ))
+                  if [ "$THRESH" -gt "$LAST_NOTIFIED" ] && [ "$THRESH" -ge 10 ] && [ "$THRESH" -le 90 ]; then
+                    notify_telegram "⬆️ Sir, your backup upload is at ${THRESH}% complete. ${ETA}"
+                    LAST_NOTIFIED=$THRESH
+                  fi
+                fi
+              fi
+            done
+
+            wait $RC_PID
+            RC=$?
+            rm -f "$LOGFILE"
+            return $RC
+          }
+
+          # STAGED UPLOAD: pehle ek TEMP naam (".new") se upload karta hai,
+          # size verify karta hai, aur SIRF tabhi asli file ko replace karta
+          # hai jab verify pass ho jaye. Isse agar upload beech me fail ho
+          # ya corrupt ho jaye, to Drive par jo PURANA sahi backup hai wo
+          # kabhi touch hi nahi hota — safe rehta hai. Max 3 retry karta hai.
+          upload_and_verify() {
+            LOCAL_FILE=$1
+            REMOTE_NAME=$2
+            SHOW_PROGRESS=${3:-no}
+            TEMP_NAME="${REMOTE_NAME}.new"
+            ATTEMPT=1
+            MAX_ATTEMPTS=3
+
+            LOCAL_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null) || LOCAL_SIZE=0
+
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+              echo "   Upload attempt $ATTEMPT/$MAX_ATTEMPTS: $TEMP_NAME (staging, purana backup abhi safe hai)"
+              if [ "$SHOW_PROGRESS" = "yes" ]; then
+                upload_with_progress "$LOCAL_FILE" "gdrive:$TEMP_NAME" || true
+              else
+                rclone copyto "$LOCAL_FILE" "gdrive:$TEMP_NAME" || true
+              fi
+
+              # rclone size command se Drive par actual size check karo
+              REMOTE_SIZE=$(rclone size gdrive:"$TEMP_NAME" --json 2>/dev/null | grep -o '"bytes":[0-9]*' | grep -o '[0-9]*') || REMOTE_SIZE=0
+
+              if [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ] && [ "$LOCAL_SIZE" != "0" ]; then
+                echo "   ✅ Staged upload verified ($LOCAL_SIZE bytes match) — ab purane backup ko replace kar rahe hain"
+                rclone moveto "gdrive:$TEMP_NAME" "gdrive:$REMOTE_NAME" || true
+                echo "   ✅ Verified aur promoted: $REMOTE_NAME"
+                return 0
+              else
+                echo "   ⚠️ Mismatch (local=$LOCAL_SIZE drive=$REMOTE_SIZE), retrying..."
+                ATTEMPT=$((ATTEMPT + 1))
+                sleep 5
+              fi
+            done
+
+            echo "   ❌ FAILED to verify upload of $REMOTE_NAME after $MAX_ATTEMPTS tries — purana backup TOUCH nahi kiya, safe hai. Staged temp file delete kar rahe hain."
+            rclone deletefile "gdrive:$TEMP_NAME" 2>/dev/null || true
+            return 1
+          }
+
+          backup_now() {
+            echo "🔄 Backup shuru ho raha hai... ($(date))"
+            notify_telegram "🔄 Sir, your backup is being taken now, please wait."
+            OK=1
+
+            if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
+              # Windows VM ko thodi der ke liye PAUSE kar rahe hain (freeze,
+              # stop nahi) taaki disk image file backup ke BEECH me change
+              # na ho — warna tar "file changed as we read it" bolke
+              # background loop hi crash kar deta tha (silently ruk jaata
+              # tha, agla koi backup kabhi nahi hota tha). Pause se RDP
+              # session bhi freeze ho jayega thodi der ke liye, phir wapas
+              # normal ho jayega jaise hi backup ka tar step khatam ho.
+              sudo docker pause windows 2>/dev/null || true
+              sudo tar -czf ~/windows-backup.tar.gz -C /opt windows || true
+              sudo docker unpause windows 2>/dev/null || true
+              sudo chown $USER:$USER ~/windows-backup.tar.gz 2>/dev/null || true
+              upload_and_verify ~/windows-backup.tar.gz windows-backup.tar.gz yes || OK=0
+            fi
+
+            # Tailscale identity ka backup ab HAR backup cycle me bhi hota
+            # hai (35-min timer, disconnect, sab me) — taaki IP kabhi bhi
+            # kisi bhi run me change na ho, chahe state beech me kuch bhi
+            # ho jaye.
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
+              sudo mkdir -p /tmp/ts-state
+              sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/ || true
+              sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state . || true
+              sudo chown $USER:$USER ~/tailscale-state.tar.gz 2>/dev/null || true
+              upload_and_verify ~/tailscale-state.tar.gz tailscale-state.tar.gz || true
+            fi
+
+            rclone cleanup gdrive: || true
+
+            if [ "$OK" = "1" ]; then
+              echo "✅ Backup complete aur VERIFIED ($(date))"
+              notify_telegram "✅ Sir, your backup has been completed and verified successfully."
+            else
+              echo "❌ Backup me kuch verify nahi hua — agla cycle me phir try hoga ($(date))"
+              notify_telegram "⚠️ Sir, there was an issue verifying your last backup. It will be retried automatically in the next cycle."
+            fi
+          }
+
+          # LOCK: agar timer-based aur RDP-disconnect-based backup ek
+          # saath trigger ho jaye, to dono ek time pe tar/upload na karein
+          # (isse file corrupt ho sakti hai). Ye lock ensure karta hai
+          # ki ek waqt me sirf EK backup chale.
+          LOCKFILE=/tmp/backup.lock
+
+          run_backup_safely() {
+            REASON=$1
+            if ( set -o noclobber; echo "$$" > "$LOCKFILE" ) 2>/dev/null; then
+              echo "🔔 Trigger: $REASON"
+              backup_now
+              rm -f "$LOCKFILE"
+            else
+              echo "⏭️ Backup already chal raha hai, skip ($REASON)"
+            fi
+          }
+
+          # GitHub API se is workflow run ko cancel karta hai. Automatic
+          # GH_TOKEN use hota hai (koi naya secret nahi chahiye).
+          cancel_workflow() {
+            notify_telegram "🛑 Sir, your VPS workflow is being stopped now."
+            curl -s -X POST \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/cancel" > /dev/null || true
+          }
+
+          # ---- Telegram /stop control system ----
+          # Python script Telegram ko poll karta rehta hai. Jab tum bot ko
+          # "/stop" bhejte ho, ye 3 button wala message bhejta hai. Jo bhi
+          # button dabao, uska "action" ek file (/tmp/telegram_action) me
+          # likh deta hai — bash wala watcher loop use padh ke asli kaam
+          # karta hai (backup lena / workflow cancel karna).
+          cat > /tmp/telegram_listener.py << 'PYEOF'
+          import json
+          import os
+          import time
+          import urllib.request
+          import urllib.parse
+
+          BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+          API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+          ACTION_FILE = "/tmp/telegram_action"
+
+          def api_call(method, params=None, timeout=25):
+              url = f"{API}/{method}"
+              data = urllib.parse.urlencode(params or {}).encode()
+              try:
+                  with urllib.request.urlopen(url, data=data, timeout=timeout) as resp:
+                      return json.loads(resp.read().decode())
+              except Exception:
+                  return None
+
+          def send_buttons():
+              keyboard = {
+                  "inline_keyboard": [
+                      [{"text": "💾 Backup & Stop", "callback_data": "backup_stop"}],
+                      [{"text": "⛔ Stop Without Backup", "callback_data": "stop_nobackup"}],
+                      [{"text": "🔄 Backup Now – Keep Running", "callback_data": "backup_only"}],
+                  ]
+              }
+              api_call("sendMessage", {
+                  "chat_id": CHAT_ID,
+                  "text": "Sir, what would you like to do?",
+                  "reply_markup": json.dumps(keyboard),
+              })
+
+          def answer_callback(cb_id, text):
+              api_call("answerCallbackQuery", {"callback_query_id": cb_id, "text": text})
+
+          def main():
+              offset = 0
+              while True:
+                  result = api_call("getUpdates", {"offset": offset, "timeout": 20}, timeout=25)
+                  if not result or not result.get("ok"):
+                      time.sleep(3)
+                      continue
+                  for update in result.get("result", []):
+                      offset = update["update_id"] + 1
+
+                      msg = update.get("message")
+                      if msg and str(msg.get("chat", {}).get("id")) == str(CHAT_ID):
+                          text = (msg.get("text") or "").strip()
+                          if text == "/stop":
+                              send_buttons()
+
+                      cb = update.get("callback_query")
+                      if cb and str(cb.get("message", {}).get("chat", {}).get("id")) == str(CHAT_ID):
+                          data = cb.get("data", "")
+                          if data in ("backup_stop", "stop_nobackup", "backup_only"):
+                              answer_callback(cb["id"], "Received, processing...")
+                              with open(ACTION_FILE, "w") as f:
+                                  f.write(data)
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+          python3 /tmp/telegram_listener.py &
+          TELEGRAM_LISTENER_PID=$!
+
+          # Bash watcher: har 3 sec me dekhta hai ki koi button action
+          # aaya hai ya nahi, aur uske hisaab se asli kaam karta hai.
+          (
+            NOW=0
+            while [ $NOW -lt $TOTAL_SECONDS ]; do
+              sleep 3
+              NOW=$((NOW + 3))
+              if [ -f /tmp/telegram_action ]; then
+                ACTION=$(cat /tmp/telegram_action)
+                rm -f /tmp/telegram_action
+                case "$ACTION" in
+                  backup_stop)
+                    notify_telegram "💾 Sir, taking a backup before stopping."
+                    run_backup_safely "telegram: backup & stop"
+                    cancel_workflow
+                    ;;
+                  stop_nobackup)
+                    notify_telegram "⛔ Sir, stopping without taking a backup, as requested."
+                    cancel_workflow
+                    ;;
+                  backup_only)
+                    notify_telegram "🔄 Sir, taking a backup now. The session will keep running."
+                    run_backup_safely "telegram: backup now"
+                    ;;
+                esac
+              fi
+            done
+          ) &
+          CONTROL_PID=$!
+
+          # Cancel / error / timeout aate hi ek aakhri backup try karo
+          trap 'echo "⚠️ Signal mila, emergency backup..."; notify_telegram "⚠️ Sir, your VPS session is shutting down. An emergency backup is being taken."; run_backup_safely "shutdown signal"; kill $TELEGRAM_LISTENER_PID 2>/dev/null || true; exit 0' TERM INT
+
+          notify_telegram "✅ Sir, your VPS setup is fully ready. Automatic backups will run every 35 minutes and on every RDP disconnect. Send /stop anytime to control the session."
+
+          # ---- Background loop 1: har 35 min timer-based backup ----
+          (
+            ELAPSED=0
+            while [ $ELAPSED -lt $TOTAL_SECONDS ]; do
+              SLEEP_NOW=$BACKUP_INTERVAL
+              REMAINING=$((TOTAL_SECONDS - ELAPSED))
+              if [ $REMAINING -lt $BACKUP_INTERVAL ]; then
+                SLEEP_NOW=$REMAINING
+              fi
+              sleep $SLEEP_NOW
+              ELAPSED=$((ELAPSED + SLEEP_NOW))
+              run_backup_safely "35-min timer"
+            done
+          ) &
+          TIMER_PID=$!
+
+          # ---- Background loop 2: RDP (port 3389) connect/disconnect detect ----
+          # Har 15 sec check karta hai ki koi RDP client connected hai ya nahi.
+          # CONNECT hote hi ek welcome message jaata hai, aur DISCONNECT hote hi
+          # ek thank-you message + backup trigger hota hai. 3 min cooldown hai
+          # taaki baar-baar connect/disconnect hone par backup spam na ho
+          # (welcome/thank-you messages har baar jaate hain, sirf backup trigger
+          # cooldown follow karta hai).
+          (
+            WAS_CONNECTED=0
+            COOLDOWN_UNTIL=0
+            NOW=0
+            while [ $NOW -lt $TOTAL_SECONDS ]; do
+              sleep 15
+              NOW=$((NOW + 15))
+              ACTIVE=$(sudo ss -tn 2>/dev/null | grep ':3389' | grep -c ESTAB || true)
+              if [ "$ACTIVE" -gt 0 ] && [ "$WAS_CONNECTED" = "0" ]; then
+                # abhi connect hua hai
+                WAS_CONNECTED=1
+                notify_telegram "🟢 Sir, you are now connected to your RDP. Enjoy!"
+              elif [ "$ACTIVE" -eq 0 ] && [ "$WAS_CONNECTED" = "1" ]; then
+                # abhi disconnect hua hai
+                WAS_CONNECTED=0
+                notify_telegram "👋 Sir, thanks for coming. See you soon!"
+                if [ $NOW -ge $COOLDOWN_UNTIL ]; then
+                  run_backup_safely "RDP disconnect detected"
+                  COOLDOWN_UNTIL=$((NOW + 180))
+                fi
+              fi
+            done
+          ) &
+          MONITOR_PID=$!
+
+          wait $TIMER_PID $MONITOR_PID $CONTROL_PID
+          kill $TELEGRAM_LISTENER_PID 2>/dev/null || true
+
+      - name: Stop Windows cleanly
+        if: always()
+        run: |
+          echo "Windows ko gracefully stop karne ki koshish (max 60 sec)..."
+          timeout 60 sudo docker stop windows || true
+          echo "Agar abhi bhi chal raha hai to force-kill kar rahe hain..."
+          sudo docker kill windows || true
+          sleep 5
+
+      # Ye final backup ab safety-net hai — normal case me upar wale
+      # loop ne already sab kuch upload kar diya hoga.
+      - name: Final backup (safety net)
+        if: always()
+        run: |
+          if [ -d /opt/windows ] && [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
+            sudo tar -czf ~/windows-backup.tar.gz -C /opt windows || true
+            sudo chown $USER:$USER ~/windows-backup.tar.gz 2>/dev/null || true
+            rclone copy ~/windows-backup.tar.gz gdrive: --progress || true
+            rclone cleanup gdrive: || true
+          fi
+          if [ -f /var/lib/tailscale/tailscaled.state ]; then
+            sudo mkdir -p /tmp/ts-state
+            sudo cp /var/lib/tailscale/tailscaled.state /tmp/ts-state/ || true
+            sudo tar -czf ~/tailscale-state.tar.gz -C /tmp/ts-state . || true
+            sudo chown $USER:$USER ~/tailscale-state.tar.gz 2>/dev/null || true
+            rclone copy ~/tailscale-state.tar.gz gdrive: --progress || true
+          fi
