@@ -28,186 +28,60 @@ jobs:
       # 1. CHECKOUT
       # ============================================================
 
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
 
       # ============================================================
-      # 2. INSTALL REQUIRED PACKAGES
+      # 2. TELEGRAM - WORKFLOW START
       # ============================================================
 
-      - name: Install prerequisites
+      - name: Notify - workflow started
         run: |
-          set -e
+          NOW=$(date '+%I:%M:%S %p')
 
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode \
+            "text=${NOW} : 🚀 Sir, your VPS workflow has started. Setup is in progress, please wait." \
+            > /dev/null || true
+
+
+      # ============================================================
+      # 3. HOSTNAME
+      # ============================================================
+
+      - name: Set hostname to biralo
+        run: |
+          sudo hostnamectl set-hostname biralo
+
+
+      # ============================================================
+      # 4. PREREQUISITES + RCLONE
+      # ============================================================
+
+      - name: Install prerequisites + rclone
+        run: |
           sudo apt-get update
 
           sudo apt-get install -y \
+            tmate \
             curl \
             unzip \
             sudo \
             net-tools \
             neofetch \
             iproute2 \
+            xxd \
             openssh-server \
             jq \
-            util-linux \
-            ca-certificates \
-            tar
+            util-linux
 
-          curl -fsSL https://rclone.org/install.sh | sudo bash
+          curl https://rclone.org/install.sh | sudo bash
 
-          echo "rclone:"
+          echo "rclone version:"
           rclone version | head -3
-
-          echo "Docker:"
-          docker --version
-
-
-      # ============================================================
-      # 3. TELEGRAM FUNCTIONS + VALIDATION
-      # ============================================================
-
-      - name: Setup Telegram
-        run: |
-          set -u
-
-          API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-
-          telegram_send() {
-            local MESSAGE="$1"
-            local NOW
-
-            NOW=$(TZ=Asia/Kolkata date '+%I:%M:%S %p')
-
-            RESPONSE=$(curl -fsS \
-              --max-time 20 \
-              -X POST \
-              "$API/sendMessage" \
-              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-              --data-urlencode "text=${NOW} : ${MESSAGE}" \
-              2>&1) || {
-                echo "Telegram send failed:"
-                echo "$RESPONSE"
-                return 1
-              }
-
-            if ! echo "$RESPONSE" | jq -e '.ok == true' >/dev/null 2>&1; then
-              echo "Telegram API returned an error:"
-              echo "$RESPONSE"
-              return 1
-            fi
-
-            return 0
-          }
-
-          export API
-
-          # Test token
-          GETME=$(curl -fsS \
-            --max-time 20 \
-            "$API/getMe" \
-            2>&1) || {
-              echo "ERROR: Telegram bot token/API connection failed."
-              echo "$GETME"
-              exit 1
-            }
-
-          if ! echo "$GETME" | jq -e '.ok == true' >/dev/null 2>&1; then
-            echo "ERROR: Telegram token is invalid."
-            echo "$GETME"
-            exit 1
-          fi
-
-          BOT_NAME=$(echo "$GETME" | jq -r '.result.username // "unknown"')
-
-          echo "Telegram bot: @$BOT_NAME"
-
-          # Export helper for later steps
-          cat > /tmp/telegram_functions.sh <<'EOF'
-          telegram_send() {
-            local MESSAGE="$1"
-            local NOW
-            local API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-
-            NOW=$(TZ=Asia/Kolkata date '+%I:%M:%S %p')
-
-            RESPONSE=$(curl -fsS \
-              --max-time 20 \
-              -X POST \
-              "$API/sendMessage" \
-              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-              --data-urlencode "text=${NOW} : ${MESSAGE}" \
-              2>&1) || {
-                echo "Telegram send failed:"
-                echo "$RESPONSE"
-                return 1
-              }
-
-            if ! echo "$RESPONSE" | jq -e '.ok == true' >/dev/null 2>&1; then
-              echo "Telegram API error:"
-              echo "$RESPONSE"
-              return 1
-            fi
-
-            return 0
-          }
-
-          telegram_keyboard() {
-            local MESSAGE="$1"
-            local KEYBOARD
-
-            KEYBOARD='{"inline_keyboard":[[{"text":"💾 BACKUP & STOP","callback_data":"backup_stop"}],[{"text":"❌ STOP WITHOUT BACKUP","callback_data":"stop_no_backup"}]]}'
-
-            local NOW
-            local API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-
-            NOW=$(TZ=Asia/Kolkata date '+%I:%M:%S %p')
-
-            curl -fsS \
-              --max-time 20 \
-              -X POST \
-              "$API/sendMessage" \
-              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-              --data-urlencode "text=${NOW} : ${MESSAGE}" \
-              --data-urlencode "reply_markup=${KEYBOARD}" \
-              >/tmp/telegram-keyboard-response.json 2>&1 || {
-                echo "Telegram keyboard send failed:"
-                cat /tmp/telegram-keyboard-response.json 2>/dev/null || true
-                return 1
-              }
-          }
-
-          telegram_answer_callback() {
-            local CALLBACK_ID="$1"
-            local TEXT="$2"
-            local API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-
-            curl -fsS \
-              --max-time 20 \
-              -X POST \
-              "$API/answerCallbackQuery" \
-              --data-urlencode "callback_query_id=${CALLBACK_ID}" \
-              --data-urlencode "text=${TEXT}" \
-              >/dev/null 2>&1 || true
-          }
-
-          telegram_send || true
-
-          # Send first startup message
-          telegram_send "🚀 VPS workflow started. Telegram connection is working." || true
-
-          echo "Telegram setup complete."
-
-
-      # ============================================================
-      # 4. HOSTNAME
-      # ============================================================
-
-      - name: Set hostname
-        run: |
-          sudo hostnamectl set-hostname biralo
-          hostname
 
 
       # ============================================================
@@ -216,8 +90,6 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          set -e
-
           curl -fsSL https://tailscale.com/install.sh | sh
 
 
@@ -225,41 +97,57 @@ jobs:
       # 6. RESTORE TAILSCALE STATE
       # ============================================================
 
-      - name: Restore Tailscale state
+      - name: Restore Tailscale state from Drive
         run: |
-          set -u
-
-          source /tmp/telegram_functions.sh
-
           mkdir -p ./restore
 
           if rclone lsf gdrive: --files-only | grep -Fxq "tailscale-state.tar.gz"; then
 
-            telegram_send "🔄 Previous Tailscale state found. Restoring it..." || true
+            NOW=$(date '+%I:%M:%S %p')
 
-            if rclone copyto \
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : 🔄 Tailscale previous state found. Restoring it now..." \
+              > /dev/null || true
+
+            rclone copyto \
               "gdrive:tailscale-state.tar.gz" \
-              "./restore/tailscale-state.tar.gz"; then
+              "./restore/tailscale-state.tar.gz" \
+              --progress
 
-              sudo mkdir -p /var/lib/tailscale
+            sudo mkdir -p /var/lib/tailscale
 
-              sudo tar \
-                -xzf ./restore/tailscale-state.tar.gz \
-                -C /var/lib/tailscale/
+            sudo tar \
+              -xzf ./restore/tailscale-state.tar.gz \
+              -C /var/lib/tailscale/
 
-              sudo chmod 600 \
-                /var/lib/tailscale/tailscaled.state \
-                2>/dev/null || true
+            sudo chmod 600 \
+              /var/lib/tailscale/tailscaled.state \
+              2>/dev/null || true
 
-              telegram_send "✅ Tailscale state restored successfully." || true
+            NOW=$(date '+%I:%M:%S %p')
 
-            else
-              telegram_send "⚠️ Tailscale state download failed. A new Tailscale state will be created." || true
-            fi
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : ✅ Tailscale state restored successfully." \
+              > /dev/null || true
 
           else
 
-            telegram_send "ℹ️ No previous Tailscale state found. Creating a new one." || true
+            echo "No previous Tailscale state found."
+
+            NOW=$(date '+%I:%M:%S %p')
+
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : ℹ️ No previous Tailscale state found. A new state will be created." \
+              > /dev/null || true
 
           fi
 
@@ -270,9 +158,7 @@ jobs:
 
       - name: Start Tailscale
         run: |
-          set -e
-
-          sudo tailscaled >/tmp/tailscaled.log 2>&1 &
+          sudo tailscaled &
 
           sleep 8
 
@@ -281,24 +167,16 @@ jobs:
             --hostname=biralo \
             --ssh
 
-          echo "Tailscale IPv4:"
+          echo "Tailscale IP:"
           tailscale ip -4
-
-          source /tmp/telegram_functions.sh
-
-          TSIP=$(tailscale ip -4 | head -1)
-
-          telegram_send "🌐 Tailscale is online. VPS IP: ${TSIP}" || true
 
 
       # ============================================================
-      # 8. CREATE LINUX USER
+      # 8. CREATE USER
       # ============================================================
 
       - name: Create user biralo
         run: |
-          set -e
-
           if ! id -u biralo >/dev/null 2>&1; then
 
             sudo useradd \
@@ -311,9 +189,7 @@ jobs:
             sudo usermod -aG sudo biralo
 
             echo "biralo ALL=(ALL) NOPASSWD:ALL" \
-              | sudo tee /etc/sudoers.d/biralo >/dev/null
-
-            sudo chmod 440 /etc/sudoers.d/biralo
+              | sudo tee /etc/sudoers.d/biralo
 
           fi
 
@@ -322,10 +198,8 @@ jobs:
       # 9. SSH
       # ============================================================
 
-      - name: Start SSH
+      - name: Start SSH server
         run: |
-          set -e
-
           sudo sed -i \
             's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
             /etc/ssh/sshd_config
@@ -339,38 +213,48 @@ jobs:
 
           sudo systemctl status ssh --no-pager || true
 
+          echo "SSH server is running."
+
 
       # ============================================================
-      # 10. NETWORK
+      # 10. NETWORK FIX
       # ============================================================
 
-      - name: Configure networking
+      - name: Fix networking for Tailscale + Docker
         run: |
-          set -e
+          echo "Enabling IP forwarding..."
 
           sudo sysctl -w net.ipv4.ip_forward=1
+
+          echo "Setting rp_filter to loose mode..."
 
           sudo sysctl -w net.ipv4.conf.all.rp_filter=2
           sudo sysctl -w net.ipv4.conf.default.rp_filter=2
 
           for iface in /proc/sys/net/ipv4/conf/*/rp_filter; do
-            echo 2 | sudo tee "$iface" >/dev/null || true
+            echo 2 | sudo tee "$iface" > /dev/null || true
           done
 
-          if sudo ufw status 2>/dev/null | grep -q "Status: active"; then
+          echo "Checking UFW..."
+
+          if sudo ufw status | grep -q "Status: active"; then
+
             sudo ufw allow 3389/tcp
             sudo ufw allow 3389/udp
             sudo ufw allow 8006/tcp
+
           fi
 
+          echo "Networking fix complete."
+
 
       # ============================================================
-      # 11. DISK CLEANUP
+      # 11. FREE SPACE
       # ============================================================
 
-      - name: Free disk space
+      - name: Free up disk space
         run: |
-          echo "Before:"
+          echo "Disk before cleanup:"
           df -h /
 
           sudo rm -rf \
@@ -382,9 +266,10 @@ jobs:
 
           sudo apt-get clean
 
-          docker image prune -af 2>/dev/null || true
+          docker image prune --all --force \
+            2>/dev/null || true
 
-          echo "After:"
+          echo "Disk after cleanup:"
           df -h /
 
 
@@ -392,209 +277,58 @@ jobs:
       # 12. RESOURCE CHECK
       # ============================================================
 
-      - name: Check resources
+      - name: Check available resources
         run: |
-          echo "===== DISK ====="
+          echo "Disk:"
           df -h /
 
           echo
-          echo "===== MEMORY ====="
+          echo "Memory:"
           free -h
 
           echo
-          echo "===== CPU ====="
+          echo "CPU:"
           nproc
 
 
       # ============================================================
-      # 13. TELEGRAM STOP LISTENER
+      # 13. CHECK WINDOWS BACKUP
       # ============================================================
 
-      - name: Start Telegram stop listener
+      - name: Check Google Drive and restore Windows
         run: |
-          set -u
-
-          source /tmp/telegram_functions.sh
-
-          REQUEST_FILE="/tmp/vps-stop-request"
-          OFFSET_FILE="/tmp/telegram-offset"
-
-          rm -f "$REQUEST_FILE"
-          rm -f "$OFFSET_FILE"
-
-          API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-
-          # Check whether webhook is blocking getUpdates
-          WEBHOOK=$(curl -fsS \
-            --max-time 20 \
-            "$API/getWebhookInfo" \
-            2>/dev/null || echo '{}')
-
-          WEBHOOK_URL=$(echo "$WEBHOOK" | jq -r '.result.url // ""')
-
-          if [ -n "$WEBHOOK_URL" ]; then
-            echo "Telegram webhook detected: $WEBHOOK_URL"
-
-            telegram_send \
-              "⚠️ Telegram webhook detected. /stop control may not work until the webhook is removed." \
-              || true
-          fi
-
-          # Ignore old pending messages.
-          INITIAL=$(curl -fsS \
-            --max-time 30 \
-            "$API/getUpdates?limit=100&timeout=0" \
-            2>/dev/null || echo '{"ok":false,"result":[]}')
-
-          LAST_ID=$(echo "$INITIAL" \
-            | jq -r '[.result[]?.update_id] | max // -1')
-
-          NEXT_OFFSET=$((LAST_ID + 1))
-
-          echo "$NEXT_OFFSET" > "$OFFSET_FILE"
-
-          echo "Telegram listener starting with offset $NEXT_OFFSET"
-
-          telegram_send \
-            "🟢 Stop controller is active. Send /stop anytime to safely shut down this VPS." \
-            || true
-
-          while true; do
-
-            if [ -f "$REQUEST_FILE" ]; then
-              exit 0
-            fi
-
-            OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || echo "0")
-
-            RESPONSE=$(curl -fsS \
-              --max-time 30 \
-              --get \
-              "$API/getUpdates" \
-              --data-urlencode "offset=${OFFSET}" \
-              --data-urlencode "limit=20" \
-              --data-urlencode "timeout=20" \
-              --data-urlencode 'allowed_updates=["message","callback_query"]' \
-              2>/tmp/telegram-poll-error.log || true)
-
-            if ! echo "$RESPONSE" | jq -e '.ok == true' >/dev/null 2>&1; then
-              echo "Telegram polling error:"
-              cat /tmp/telegram-poll-error.log 2>/dev/null || true
-              echo "$RESPONSE"
-
-              sleep 5
-              continue
-            fi
-
-            echo "$RESPONSE" \
-              | jq -c '.result[]?' \
-              | while IFS= read -r UPDATE; do
-
-                UPDATE_ID=$(echo "$UPDATE" | jq -r '.update_id')
-
-                echo $((UPDATE_ID + 1)) > "$OFFSET_FILE"
-
-                CHAT_ID=$(echo "$UPDATE" \
-                  | jq -r '.message.chat.id // .callback_query.message.chat.id // empty')
-
-                if [ -z "$CHAT_ID" ]; then
-                  continue
-                fi
-
-                if [ "$CHAT_ID" != "$TELEGRAM_CHAT_ID" ]; then
-                  echo "Ignoring Telegram update from unauthorized chat."
-                  continue
-                fi
-
-                TEXT=$(echo "$UPDATE" \
-                  | jq -r '.message.text // empty')
-
-                CALLBACK=$(echo "$UPDATE" \
-                  | jq -r '.callback_query.data // empty')
-
-                CALLBACK_ID=$(echo "$UPDATE" \
-                  | jq -r '.callback_query.id // empty')
-
-                # --------------------------------------------------
-                # /stop command
-                # --------------------------------------------------
-
-                if [[ "$TEXT" == "/stop" || "$TEXT" == "/stop@"* ]]; then
-
-                  telegram_keyboard \
-                    "🛑 Shutdown request received. Choose what should happen:" \
-                    || true
-
-                  continue
-                fi
-
-                # --------------------------------------------------
-                # BACKUP + STOP
-                # --------------------------------------------------
-
-                if [ "$CALLBACK" = "backup_stop" ]; then
-
-                  telegram_answer_callback \
-                    "$CALLBACK_ID" \
-                    "Backup + shutdown selected." \
-                    || true
-
-                  echo "backup" > "$REQUEST_FILE"
-
-                  continue
-                fi
-
-                # --------------------------------------------------
-                # STOP WITHOUT BACKUP
-                # --------------------------------------------------
-
-                if [ "$CALLBACK" = "stop_no_backup" ]; then
-
-                  telegram_answer_callback \
-                    "$CALLBACK_ID" \
-                    "Shutdown without backup selected." \
-                    || true
-
-                  echo "nobackup" > "$REQUEST_FILE"
-
-                  continue
-                fi
-
-              done
-
-          done
-        background: true
-
-
-      # ============================================================
-      # 14. CHECK WINDOWS BACKUP
-      # ============================================================
-
-      - name: Check and restore Windows backup
-        run: |
-          set -u
-
-          source /tmp/telegram_functions.sh
 
           mkdir -p ./restore
 
-          if rclone lsf gdrive: --files-only \
-            | grep -Fxq "windows-backup.tar.gz"; then
+          if rclone lsf gdrive: --files-only | grep -Fxq "windows-backup.tar.gz"; then
 
-            echo "Windows backup found."
+            echo "Backup found."
 
             echo "WINDOWS_MODE=restore" >> "$GITHUB_ENV"
 
-            telegram_send \
-              "📦 Previous Windows backup found on Google Drive." \
-              || true
+            NOW=$(date '+%I:%M:%S %p')
 
-            telegram_send \
-              "⬇️ Backup load ho raha hai. Please wait..." \
-              || true
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : 📦 Previous Windows backup found on Google Drive." \
+              > /dev/null || true
 
-            LOGFILE="/tmp/restore-progress.log"
+            NOW=$(date '+%I:%M:%S %p')
 
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : ⬇️ Your backup is loading now. Please wait..." \
+              > /dev/null || true
+
+            # ------------------------------------------------------
+            # Restore backup with progress
+            # ------------------------------------------------------
+
+            LOGFILE=/tmp/restore-progress.log
             rm -f "$LOGFILE"
 
             rclone copyto \
@@ -603,26 +337,24 @@ jobs:
               --stats 5s \
               --stats-one-line \
               --stats-log-level NOTICE \
-              >"$LOGFILE" 2>&1 &
+              > "$LOGFILE" 2>&1 &
 
             RCLONE_PID=$!
 
-            LAST_MILESTONE=0
+            LAST_PERCENT=0
 
             while kill -0 "$RCLONE_PID" 2>/dev/null; do
 
               sleep 5
 
-              LINE=$(tail -n 30 "$LOGFILE" 2>/dev/null \
-                | grep '%' \
-                | tail -1 || true)
+              LAST_LINE=$(tail -n 20 "$LOGFILE" 2>/dev/null | grep '%' | tail -1 || true)
 
-              PCT=$(echo "$LINE" \
-                | grep -oE '[0-9]{1,3}%' \
+              PCT=$(echo "$LAST_LINE" \
+                | grep -oE '[0-9]+%' \
                 | tail -1 \
                 | tr -d '%' || true)
 
-              ETA=$(echo "$LINE" \
+              ETA=$(echo "$LAST_LINE" \
                 | grep -oE 'ETA [^,]+' \
                 | tail -1 || true)
 
@@ -631,47 +363,50 @@ jobs:
                 MILESTONE=$((PCT / 10 * 10))
 
                 if [ "$MILESTONE" -ge 10 ] &&
-                   [ "$MILESTONE" -le 90 ] &&
-                   [ "$MILESTONE" -gt "$LAST_MILESTONE" ]; then
+                   [ "$MILESTONE" -le 100 ] &&
+                   [ "$MILESTONE" -gt "$LAST_PERCENT" ]; then
+
+                  NOW=$(date '+%I:%M:%S %p')
 
                   if [ -n "$ETA" ]; then
-                    telegram_send \
-                      "⬇️ Backup loading: ${MILESTONE}% complete — ${ETA} remaining." \
-                      || true
+                    MESSAGE="${NOW} : ⬇️ Backup loading: ${MILESTONE}% complete — ${ETA} remaining."
                   else
-                    telegram_send \
-                      "⬇️ Backup loading: ${MILESTONE}% complete." \
-                      || true
+                    MESSAGE="${NOW} : ⬇️ Backup loading: ${MILESTONE}% complete."
                   fi
 
-                  echo "Restore: ${MILESTONE}% ${ETA}"
+                  curl -s -X POST \
+                    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                    -d chat_id="${TELEGRAM_CHAT_ID}" \
+                    --data-urlencode \
+                    "text=${MESSAGE}" \
+                    > /dev/null || true
 
-                  LAST_MILESTONE=$MILESTONE
+                  LAST_PERCENT=$MILESTONE
+
                 fi
               fi
 
             done
 
-            if wait "$RCLONE_PID"; then
-              RCLONE_RC=0
-            else
-              RCLONE_RC=$?
-            fi
+            wait "$RCLONE_PID"
+            RCLONE_RC=$?
 
             if [ "$RCLONE_RC" -ne 0 ]; then
+              echo "Backup download failed."
 
-              echo "Restore download failed."
+              NOW=$(date '+%I:%M:%S %p')
 
-              telegram_send \
-                "❌ Windows backup download failed." \
-                || true
+              curl -s -X POST \
+                "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode \
+                "text=${NOW} : ❌ Windows backup could not be downloaded from Google Drive." \
+                > /dev/null || true
 
               exit 1
             fi
 
-            telegram_send \
-              "⬇️ Backup loading: 100% complete." \
-              || true
+            rm -f "$LOGFILE"
 
             echo "Extracting Windows backup..."
 
@@ -682,11 +417,14 @@ jobs:
               -xzf ./restore/windows-backup.tar.gz \
               -C /opt/
 
-            rm -f ./restore/windows-backup.tar.gz
+            NOW=$(date '+%I:%M:%S %p')
 
-            telegram_send \
-              "📦 Backup extracted successfully. Windows is starting." \
-              || true
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : 📦 Backup has been extracted successfully. Windows is starting now..." \
+              > /dev/null || true
 
           else
 
@@ -694,33 +432,42 @@ jobs:
 
             echo "WINDOWS_MODE=fresh" >> "$GITHUB_ENV"
 
-            telegram_send \
-              "⚠️ No previous Windows backup was found." \
-              || true
+            NOW=$(date '+%I:%M:%S %p')
 
-            telegram_send \
-              "🪟 Fresh Windows installation is starting. I will report download progress when available." \
-              || true
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : ⚠️ No previous Windows backup was found." \
+              > /dev/null || true
+
+            NOW=$(date '+%I:%M:%S %p')
+
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : 🪟 Windows installation is starting now. I will keep sending installation progress." \
+              > /dev/null || true
 
           fi
 
 
       # ============================================================
-      # 15. PULL DOCKER WINDOWS IMAGE
+      # 14. PULL WINDOWS IMAGE
       # ============================================================
 
-      - name: Pull Windows Docker image
+      - name: Pull Windows image
         run: |
           docker pull ghcr.io/dockur/windows
 
 
       # ============================================================
-      # 16. START WINDOWS
+      # 15. START WINDOWS
       # ============================================================
 
       - name: Start Windows
         run: |
-          set -e
 
           docker rm -f windows 2>/dev/null || true
 
@@ -738,75 +485,231 @@ jobs:
             -v /opt/windows:/storage \
             --device=/dev/kvm \
             --cap-add NET_ADMIN \
-            --stop-timeout 120 \
             ghcr.io/dockur/windows
 
           echo "Windows container started."
 
 
       # ============================================================
-      # 17. WINDOWS INSTALL / RDP READY
+      # 16. WAIT FOR RDP + WINDOWS INSTALL PROGRESS
       # ============================================================
 
-      - name: Wait for Windows and RDP
+      - name: Wait for RDP and Windows installation
         run: |
-          set -u
-
-          source /tmp/telegram_functions.sh
 
           READY=0
-          LAST_INSTALL_MILESTONE=0
-          LAST_STAGE=""
+          INSTALL_LAST_PERCENT=0
+          INSTALL_100_SENT=0
 
-          telegram_send \
-            "⏳ Windows is booting. Waiting for RDP..." \
-            || true
+          echo "Waiting for Windows..."
 
-          for i in $(seq 1 240); do
+          for i in $(seq 1 210); do
 
             # ------------------------------------------------------
-            # Check container
-            # ------------------------------------------------------
-
-            if ! docker inspect windows >/dev/null 2>&1; then
-
-              telegram_send \
-                "❌ Windows container disappeared unexpectedly." \
-                || true
-
-              exit 1
-            fi
-
-            if ! docker inspect \
-              -f '{{.State.Running}}' \
-              windows 2>/dev/null \
-              | grep -q true; then
-
-              echo "Windows container is not running."
-
-            fi
-
-
-            # ------------------------------------------------------
-            # Fresh installation progress
+            # Fresh install progress from Dockur logs
             # ------------------------------------------------------
 
             if [ "${WINDOWS_MODE:-fresh}" = "fresh" ]; then
 
-              LOGS=$(docker logs windows 2>&1 | tail -n 150 || true)
+              LOGS=$(sudo docker logs windows 2>&1 | tail -n 120 || true)
 
-              PROGRESS_LINE=$(printf '%s\n' "$LOGS" \
-                | grep -Ei \
-                  'download|downloading|windows.*%|iso.*%' \
-                | grep -E '[0-9]{1,3}%' \
+              LAST_PROGRESS_LINE=$(printf '%s\n' "$LOGS" \
+                | grep -E '[0-9]{1,3}%.*(ETA|[0-9]+[smh])' \
                 | tail -1 || true)
 
-              PCT=$(printf '%s\n' "$PROGRESS_LINE" \
+              PCT=$(printf '%s\n' "$LAST_PROGRESS_LINE" \
                 | grep -oE '[0-9]{1,3}%' \
                 | tail -1 \
                 | tr -d '%' || true)
 
-              ETA=$(printf '%s\n' "$PROGRESS_LINE" \
+              ETA=$(printf '%s\n' "$LAST_PROGRESS_LINE" \
+                | grep -oE 'ETA [^[:space:]]+' \
+                | tail -1 || true)
+
+              if [[ "$PCT" =~ ^[0-9]+$ ]]; then
+
+                MILESTONE=$((PCT / 10 * 10))
+
+                if [ "$MILESTONE" -ge 10 ] &&
+                   [ "$MILESTONE" -le 90 ] &&
+                   [ "$MILESTONE" -gt "$INSTALL_LAST_PERCENT" ]; then
+
+                  NOW=$(date '+%I:%M:%S %p')
+
+                  if [ -n "$ETA" ]; then
+                    MESSAGE="${NOW} : 🪟 Windows installation/download is ${MILESTONE}% complete — ETA ${ETA}."
+                  else
+                    MESSAGE="${NOW} : 🪟 Windows installation/download is ${MILESTONE}% complete."
+                  fi
+
+                  curl -s -X POST \
+                    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                    -d chat_id="${TELEGRAM_CHAT_ID}" \
+                    --data-urlencode \
+                    "text=${MESSAGE}" \
+                    > /dev/null || true
+
+                  INSTALL_LAST_PERCENT=$MILESTONE
+
+                fi
+
+                if [ "$PCT" -ge 100 ] &&
+                   [ "$INSTALL_100_SENT" -eq 0 ]; then
+
+                  NOW=$(date '+%I:%M:%S %p')
+
+                  curl -s -X POST \
+                    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                    -d chat_id="${TELEGRAM_CHAT_ID}" \
+                    --data-urlencode \
+                    "text=${NOW} : 🪟 Windows files have reached 100%. Windows setup is continuing now..." \
+                    > /dev/null || true
+
+                  INSTALL_100_SENT=1
+                fi
+
+              fi
+
+            fi
+
+
+            # ------------------------------------------------------
+            # Real RDP protocol check
+            # ------------------------------------------------------
+
+            RESPONSE=$(timeout 3 bash -c '
+              exec 3<>/dev/tcp/127.0.0.1/3389
+              printf "\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00" >&3
+              head -c 4 <&3 | xxd -p
+            ' 2>/dev/null || true)
+
+
+            if [ -n "$RESPONSE" ]; then
+              READY=1
+              break
+            fi
+
+            sleep 10
+
+          done
+
+
+          TS_IP=$(tailscale ip -4 2>/dev/null || echo "not available")
+
+
+          if [ "$READY" = "1" ]; then
+
+            echo "RDP is ready."
+
+            NOW=$(date '+%I:%M:%S %p')
+
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : 🖥️ Sir, your RDP is ready! You can connect now. Tailscale IP: ${TS_IP}" \
+              > /dev/null || true
+
+          else
+
+            NOW=$(date '+%I:%M:%S %p')
+
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : ⚠️ RDP has not become ready within 35 minutes. Tailscale IP: ${TS_IP}" \
+              > /dev/null || true
+
+            sudo docker logs windows --tail 80 || true
+
+          fi
+
+
+      # ============================================================
+      # 17. CONNECTION DETAILS
+      # ============================================================
+
+      - name: Show connection details
+        run: |
+          echo "Tailscale IP:"
+          tailscale ip -4 || echo "not found"
+
+
+      # ============================================================
+      # 18. KEEP ALIVE + BACKUPS + RDP MONITOR
+      # ============================================================
+
+      - name: Keep alive with periodic backups
+        run: |
+
+          BACKUP_INTERVAL=2100
+          TOTAL_SECONDS=19500
+
+          LOCKFILE=/tmp/backup.lock
+
+          notify_telegram() {
+
+            MSG="$1"
+            NOW=$(date '+%I:%M:%S %p')
+
+            if [ -n "$TELEGRAM_BOT_TOKEN" ] &&
+               [ -n "$TELEGRAM_CHAT_ID" ]; then
+
+              curl -s -X POST \
+                "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                --data-urlencode \
+                "text=${NOW} : ${MSG}" \
+                > /dev/null || true
+
+            fi
+          }
+
+
+          # ========================================================
+          # RCLONE UPLOAD WITH TELEGRAM PROGRESS
+          # ========================================================
+
+          upload_with_progress() {
+
+            LOCAL_FILE="$1"
+            REMOTE_NAME="$2"
+
+            LOGFILE="/tmp/rclone-upload-${REMOTE_NAME}.log"
+
+            rm -f "$LOGFILE"
+
+            rclone copyto \
+              "$LOCAL_FILE" \
+              "gdrive:$REMOTE_NAME" \
+              --ignore-times \
+              --stats 5s \
+              --stats-one-line \
+              --stats-log-level NOTICE \
+              --retries 5 \
+              --low-level-retries 10 \
+              --retries-sleep 5s \
+              > "$LOGFILE" 2>&1 &
+
+            RCLONE_PID=$!
+
+            LAST_PERCENT=0
+
+            while kill -0 "$RCLONE_PID" 2>/dev/null; do
+
+              sleep 5
+
+              LAST_LINE=$(tail -n 20 "$LOGFILE" 2>/dev/null \
+                | grep '%' \
+                | tail -1 || true)
+
+              PCT=$(echo "$LAST_LINE" \
+                | grep -oE '[0-9]+%' \
+                | tail -1 \
+                | tr -d '%' || true)
+
+              ETA=$(echo "$LAST_LINE" \
                 | grep -oE 'ETA [^,]+' \
                 | tail -1 || true)
 
@@ -816,699 +719,715 @@ jobs:
 
                 if [ "$MILESTONE" -ge 10 ] &&
                    [ "$MILESTONE" -le 90 ] &&
-                   [ "$MILESTONE" -gt "$LAST_INSTALL_MILESTONE" ]; then
+                   [ "$MILESTONE" -gt "$LAST_PERCENT" ]; then
 
                   if [ -n "$ETA" ]; then
-                    telegram_send \
-                      "🪟 Windows download: ${MILESTONE}% complete — ${ETA} remaining." \
-                      || true
+
+                    notify_telegram \
+                      "⬆️ Backup upload ${MILESTONE}% complete — ${ETA} remaining."
+
                   else
-                    telegram_send \
-                      "🪟 Windows download: ${MILESTONE}% complete." \
-                      || true
+
+                    notify_telegram \
+                      "⬆️ Backup upload ${MILESTONE}% complete."
+
                   fi
 
-                  echo "Windows download: ${MILESTONE}%"
+                  LAST_PERCENT=$MILESTONE
 
-                  LAST_INSTALL_MILESTONE=$MILESTONE
                 fi
 
               fi
 
+            done
 
-              # ----------------------------------------------------
-              # Stage notifications
-              # ----------------------------------------------------
+            wait "$RCLONE_PID"
+            RC=$?
 
-              if printf '%s\n' "$LOGS" | grep -qi "Downloading Windows"; then
+            rm -f "$LOGFILE"
 
-                if [ "$LAST_STAGE" != "download" ]; then
-                  telegram_send \
-                    "⬇️ Windows image download has started." \
-                    || true
+            return "$RC"
+          }
 
-                  LAST_STAGE="download"
-                fi
 
-              elif printf '%s\n' "$LOGS" | grep -qi "Booting Windows"; then
+          # ========================================================
+          # VERIFY GOOGLE DRIVE FILE
+          # ========================================================
 
-                if [ "$LAST_STAGE" != "boot"; then
-                  telegram_send \
-                    "🪟 Windows image is ready and Windows is booting." \
-                    || true
+          get_remote_size() {
 
-                  LAST_STAGE="boot"
-                fi
+            REMOTE_NAME="$1"
 
-              fi
+            rclone lsjson \
+              "gdrive:" \
+              --files-only \
+              --max-depth 1 \
+              2>/dev/null \
+              | jq -r \
+                --arg NAME "$REMOTE_NAME" \
+                '[.[] | select(.Name == $NAME) | .Size] | if length > 0 then .[0] else 0 end'
+
+          }
+
+
+          # ========================================================
+          # UPLOAD + VERIFY
+          # ========================================================
+
+          upload_and_verify() {
+
+            LOCAL_FILE="$1"
+            REMOTE_NAME="$2"
+            SHOW_PROGRESS="${3:-no}"
+
+            if [ ! -f "$LOCAL_FILE" ]; then
+
+              echo "Local file missing: $LOCAL_FILE"
+
+              return 1
 
             fi
 
+            LOCAL_SIZE=$(stat -c%s "$LOCAL_FILE" 2>/dev/null || echo 0)
 
-            # ------------------------------------------------------
-            # RDP port test
-            # ------------------------------------------------------
+            echo "Local size: $LOCAL_SIZE bytes"
 
-            if timeout 3 bash -c '</dev/tcp/127.0.0.1/3389' \
-              >/dev/null 2>&1; then
+            ATTEMPT=1
+            MAX_ATTEMPTS=3
 
-              if [ "$READY" -eq 0 ]; then
+            while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
 
-                READY=1
+              echo "Upload attempt $ATTEMPT/$MAX_ATTEMPTS"
 
-                TSIP=$(tailscale ip -4 | head -1 || true)
+              if [ "$SHOW_PROGRESS" = "yes" ]; then
 
-                telegram_send \
-                  "🟢 RDP READY! Connect using ${TSIP}:3389 — Windows user: admin" \
-                  || true
+                if ! upload_with_progress \
+                  "$LOCAL_FILE" \
+                  "$REMOTE_NAME"; then
 
-                echo "RDP is READY."
-                break
+                  echo "rclone upload failed."
+
+                  ATTEMPT=$((ATTEMPT + 1))
+                  sleep 5
+                  continue
+
+                fi
+
+              else
+
+                if ! rclone copyto \
+                  "$LOCAL_FILE" \
+                  "gdrive:$REMOTE_NAME" \
+                  --ignore-times \
+                  --progress \
+                  --retries 5 \
+                  --low-level-retries 10 \
+                  --retries-sleep 5s; then
+
+                  echo "rclone upload failed."
+
+                  ATTEMPT=$((ATTEMPT + 1))
+                  sleep 5
+                  continue
+
+                fi
+
               fi
-            fi
-
-            sleep 5
-
-          done
-
-          if [ "$READY" -ne 1 ]; then
-
-            echo "RDP did not become ready."
-
-            docker logs windows --tail 100 || true
-
-            telegram_send \
-              "❌ RDP did not become ready within the expected time." \
-              || true
-
-            exit 1
-          fi
 
 
-      # ============================================================
-      # 18. MAIN VPS MONITOR
-      # ============================================================
+              REMOTE_SIZE=$(get_remote_size "$REMOTE_NAME")
 
-      - name: Keep VPS alive, monitor RDP, backup timer and Telegram
-        run: |
-          set -u
+              echo "Local size : $LOCAL_SIZE"
+              echo "Drive size : $REMOTE_SIZE"
 
-          source /tmp/telegram_functions.sh
 
-          BACKUP_INTERVAL=2100
-          LAST_BACKUP=$(date +%s)
+              if [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ]; then
 
-          WAS_CONNECTED=0
-          CONTROLLED_STOP=0
+                echo "Verified successfully."
 
-          REQUEST_FILE="/tmp/vps-stop-request"
+                return 0
 
-          echo "Main VPS monitor started."
+              fi
 
-          telegram_send \
-            "🟢 VPS is fully ready. Automatic backup every 35 minutes is active." \
-            || true
 
-          telegram_send \
-            "📱 You can send /stop in Telegram anytime to safely shut down." \
-            || true
+              echo "Size mismatch. Retrying..."
+
+              ATTEMPT=$((ATTEMPT + 1))
+
+              sleep 10
+
+            done
+
+
+            echo "Upload verification failed."
+
+            return 1
+          }
 
 
           # ========================================================
           # BACKUP FUNCTION
           # ========================================================
 
-          run_backup() {
+          backup_now() {
 
-            local REASON="$1"
+            REASON="$1"
 
-            if ! mkdir /tmp/windows-backup.lock 2>/dev/null; then
+            notify_telegram \
+              "🔄 Backup is being taken now. Reason: ${REASON}. Please wait..."
 
-              telegram_send \
-                "ℹ️ Backup requested (${REASON}), but another backup is already running. Skipping duplicate backup." \
-                || true
 
-              return 0
-            fi
+            OK=1
 
-            trap 'rmdir /tmp/windows-backup.lock 2>/dev/null || true' RETURN
-
-            echo
-            echo "=========================================="
-            echo "BACKUP START"
-            echo "Reason: $REASON"
-            echo "Time: $(date)"
-            echo "=========================================="
-
-            telegram_send \
-              "💾 Backup liya ja raha hai — reason: ${REASON}" \
-              || true
-
-            BACKUP_FILE="/opt/windows-backup.tar.gz"
 
             # ------------------------------------------------------
-            # Pause Windows
+            # WINDOWS BACKUP
             # ------------------------------------------------------
 
-            PAUSED=0
+            if [ -d /opt/windows ] &&
+               [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
 
-            if docker inspect windows >/dev/null 2>&1; then
+              echo "Pausing Windows..."
 
-              RUNNING=$(docker inspect \
-                -f '{{.State.Running}}' \
-                windows 2>/dev/null || echo false)
+              sudo docker pause windows \
+                2>/dev/null || true
 
-              if [ "$RUNNING" = "true" ]; then
 
-                echo "Pausing Windows..."
+              rm -f ~/windows-backup.tar.gz
 
-                docker pause windows >/dev/null 2>&1 || true
 
-                PAUSED=1
+              echo "Creating Windows backup..."
+
+              if ! sudo tar \
+                --sparse \
+                -czf ~/windows-backup.tar.gz \
+                -C /opt windows; then
+
+                echo "Windows tar failed."
+
+                OK=0
+
               fi
-            fi
 
 
-            # ------------------------------------------------------
-            # Create compressed backup
-            # ------------------------------------------------------
-
-            echo "Creating backup archive..."
-
-            if sudo tar \
-              --sparse \
-              -C /opt \
-              -czf "$BACKUP_FILE" \
-              windows; then
-
-              TAR_RC=0
-            else
-              TAR_RC=$?
-            fi
+              sudo docker unpause windows \
+                2>/dev/null || true
 
 
-            # ------------------------------------------------------
-            # Unpause Windows
-            # ------------------------------------------------------
-
-            if [ "$PAUSED" -eq 1 ]; then
-              docker unpause windows >/dev/null 2>&1 || true
-            fi
+              sudo chown \
+                "$USER:$USER" \
+                ~/windows-backup.tar.gz \
+                2>/dev/null || true
 
 
-            if [ "$TAR_RC" -ne 0 ]; then
+              if [ "$OK" = "1" ]; then
 
-              echo "Backup archive creation failed."
+                if ! upload_and_verify \
+                  ~/windows-backup.tar.gz \
+                  windows-backup.tar.gz \
+                  yes; then
 
-              telegram_send \
-                "❌ Backup archive create nahi ho paya." \
-                || true
-
-              return 1
-            fi
-
-
-            LOCAL_SIZE=$(stat -c%s "$BACKUP_FILE" 2>/dev/null || echo 0)
-
-            if [ "$LOCAL_SIZE" -le 0 ]; then
-
-              telegram_send \
-                "❌ Backup file empty hai. Upload nahi kiya jayega." \
-                || true
-
-              return 1
-            fi
-
-            LOCAL_HUMAN=$(numfmt --to=iec "$LOCAL_SIZE" 2>/dev/null || echo "${LOCAL_SIZE} bytes")
-
-            echo "Local backup size: $LOCAL_SIZE bytes ($LOCAL_HUMAN)"
-
-            telegram_send \
-              "📦 Backup archive ready: ${LOCAL_HUMAN}. Google Drive upload start ho raha hai." \
-              || true
-
-
-            # ------------------------------------------------------
-            # UPLOAD + EXACT VERIFICATION
-            # ------------------------------------------------------
-
-            LOGFILE="/tmp/rclone-upload.log"
-
-            UPLOAD_OK=0
-
-            for ATTEMPT in 1 2 3; do
-
-              echo
-              echo "Upload attempt $ATTEMPT/3"
-
-              rm -f "$LOGFILE"
-
-              rclone copyto \
-                "$BACKUP_FILE" \
-                "gdrive:windows-backup.tar.gz" \
-                --stats 5s \
-                --stats-one-line \
-                --stats-log-level NOTICE \
-                --retries 3 \
-                --low-level-retries 10 \
-                --drive-chunk-size 64M \
-                >"$LOGFILE" 2>&1 &
-
-              RCLONE_PID=$!
-
-              LAST_MILESTONE=0
-
-              while kill -0 "$RCLONE_PID" 2>/dev/null; do
-
-                sleep 5
-
-                LINE=$(tail -n 30 "$LOGFILE" 2>/dev/null \
-                  | grep '%' \
-                  | tail -1 || true)
-
-                PCT=$(echo "$LINE" \
-                  | grep -oE '[0-9]{1,3}%' \
-                  | tail -1 \
-                  | tr -d '%' || true)
-
-                ETA=$(echo "$LINE" \
-                  | grep -oE 'ETA [^,]+' \
-                  | tail -1 || true)
-
-                if [[ "$PCT" =~ ^[0-9]+$ ]]; then
-
-                  MILESTONE=$((PCT / 10 * 10))
-
-                  if [ "$MILESTONE" -ge 10 ] &&
-                     [ "$MILESTONE" -le 90 ] &&
-                     [ "$MILESTONE" -gt "$LAST_MILESTONE" ]; then
-
-                    if [ -n "$ETA" ]; then
-
-                      telegram_send \
-                        "📤 Backup upload: ${MILESTONE}% complete — ${ETA} remaining." \
-                        || true
-
-                      echo "Upload: ${MILESTONE}% | $ETA"
-
-                    else
-
-                      telegram_send \
-                        "📤 Backup upload: ${MILESTONE}% complete." \
-                        || true
-
-                      echo "Upload: ${MILESTONE}%"
-
-                    fi
-
-                    LAST_MILESTONE=$MILESTONE
-
-                  fi
+                  OK=0
 
                 fi
 
-              done
-
-
-              if wait "$RCLONE_PID"; then
-                RCLONE_RC=0
-              else
-                RCLONE_RC=$?
               fi
 
-
-              if [ "$RCLONE_RC" -ne 0 ]; then
-
-                echo "rclone upload failed with code $RCLONE_RC"
-
-                tail -n 50 "$LOGFILE" || true
-
-                telegram_send \
-                  "⚠️ Backup upload attempt ${ATTEMPT}/3 failed. Retrying..." \
-                  || true
-
-                sleep 10
-
-                continue
-              fi
-
-
-              # ----------------------------------------------------
-              # FINAL 100%
-              # ----------------------------------------------------
-
-              telegram_send \
-                "📤 Backup upload: 100% complete. Google Drive verification starting..." \
-                || true
-
-
-              # ----------------------------------------------------
-              # EXACT REMOTE FILE VERIFICATION
-              # ----------------------------------------------------
-
-              VERIFY_JSON=$(mktemp)
-
-              if rclone lsjson \
-                "gdrive:windows-backup.tar.gz" \
-                --stat \
-                --no-modtime \
-                --no-mimetype \
-                >"$VERIFY_JSON" 2>/tmp/rclone-verify-error.log; then
-
-                REMOTE_SIZE=$(jq -r '.Size // -1' "$VERIFY_JSON" 2>/dev/null || echo -1)
-                REMOTE_ID=$(jq -r '.ID // ""' "$VERIFY_JSON" 2>/dev/null || echo "")
-
-              else
-
-                REMOTE_SIZE=-1
-                REMOTE_ID=""
-
-              fi
-
-
-              echo "Local size : $LOCAL_SIZE"
-              echo "Remote size: $REMOTE_SIZE"
-              echo "Remote ID  : $REMOTE_ID"
-
-
-              if [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ] &&
-                 [ "$REMOTE_SIZE" -gt 0 ] &&
-                 [ -n "$REMOTE_ID" ]; then
-
-                UPLOAD_OK=1
-
-                rm -f "$VERIFY_JSON"
-
-                telegram_send \
-                  "✅ Backup successfully uploaded and verified on Google Drive. Size: ${LOCAL_HUMAN}" \
-                  || true
-
-                break
-
-              else
-
-                echo "Verification mismatch."
-
-                echo "Verification JSON:"
-                cat "$VERIFY_JSON" 2>/dev/null || true
-
-                echo "Verification error:"
-                cat /tmp/rclone-verify-error.log 2>/dev/null || true
-
-                rm -f "$VERIFY_JSON"
-
-                telegram_send \
-                  "⚠️ Drive verification mismatch on attempt ${ATTEMPT}/3. Local=${LOCAL_SIZE} bytes, Drive=${REMOTE_SIZE} bytes. Retrying..." \
-                  || true
-
-                sleep 15
-
-              fi
-
-            done
+            fi
 
 
             # ------------------------------------------------------
-            # BACKUP RESULT
+            # TAILSCALE BACKUP
             # ------------------------------------------------------
 
-            if [ "$UPLOAD_OK" -eq 1 ]; then
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
 
-              rm -f "$BACKUP_FILE"
+              sudo mkdir -p /tmp/ts-state
 
-              telegram_send \
-                "🎉 Backup complete. VPS data is safely backed up on Google Drive." \
-                || true
+              sudo cp \
+                /var/lib/tailscale/tailscaled.state \
+                /tmp/ts-state/ \
+                2>/dev/null || true
 
-              echo "BACKUP SUCCESS"
+
+              rm -f ~/tailscale-state.tar.gz
+
+
+              if sudo tar \
+                --sparse \
+                -czf ~/tailscale-state.tar.gz \
+                -C /tmp/ts-state .; then
+
+                sudo chown \
+                  "$USER:$USER" \
+                  ~/tailscale-state.tar.gz \
+                  2>/dev/null || true
+
+                if ! upload_and_verify \
+                  ~/tailscale-state.tar.gz \
+                  tailscale-state.tar.gz \
+                  no; then
+
+                  OK=0
+
+                fi
+
+              else
+
+                OK=0
+
+              fi
+
+            fi
+
+
+            rclone cleanup gdrive: \
+              2>/dev/null || true
+
+
+            # ------------------------------------------------------
+            # FINAL MESSAGE
+            # ------------------------------------------------------
+
+            if [ "$OK" = "1" ]; then
+
+              notify_telegram \
+                "✅ Backup completed and verified successfully."
 
               return 0
 
             else
 
-              telegram_send \
-                "❌ Backup upload/verification failed after 3 attempts. Local backup is being kept for safety." \
-                || true
-
-              echo "BACKUP FAILED"
+              notify_telegram \
+                "⚠️ Backup could not be fully verified. The next cycle will retry automatically."
 
               return 1
+
             fi
           }
 
 
           # ========================================================
-          # MAIN LOOP
+          # SAFE BACKUP LOCK
           # ========================================================
 
-          while true; do
+          run_backup_safely() {
 
-            NOW_SECONDS=$(date +%s)
+            REASON="$1"
+
+            exec 9>"$LOCKFILE"
+
+            if flock -n 9; then
+
+              echo "Backup started: $REASON"
+
+              backup_now "$REASON"
+
+              RC=$?
+
+              flock -u 9
+
+              return "$RC"
+
+            else
+
+              echo "Backup already running. Skipping: $REASON"
+
+              return 0
+
+            fi
+          }
 
 
-            # ======================================================
-            # TELEGRAM STOP REQUEST
-            # ======================================================
+          # ========================================================
+          # VPS READY
+          # ========================================================
 
-            if [ -f "$REQUEST_FILE" ]; then
+          notify_telegram \
+            "🟢 VPS is fully ready. Automatic backup runs every 35 minutes and after every RDP disconnect."
 
-              REQUEST=$(cat "$REQUEST_FILE" 2>/dev/null || echo "")
 
-              rm -f "$REQUEST_FILE"
+          # ========================================================
+          # TIMER LOOP
+          # ========================================================
 
-              CONTROLLED_STOP=1
+          (
+            ELAPSED=0
 
-              if [ "$REQUEST" = "backup" ]; then
+            while [ "$ELAPSED" -lt "$TOTAL_SECONDS" ]; do
 
-                telegram_send \
-                  "🛑 Backup & Stop selected. VPS ko safely backup karke shutdown kar raha hoon." \
-                  || true
+              REMAINING=$((TOTAL_SECONDS - ELAPSED))
 
-                run_backup "Telegram BACKUP & STOP" || true
+              if [ "$REMAINING" -lt "$BACKUP_INTERVAL" ]; then
+                SLEEP_NOW="$REMAINING"
+              else
+                SLEEP_NOW="$BACKUP_INTERVAL"
+              fi
 
-              elif [ "$REQUEST" = "nobackup" ]; then
+              sleep "$SLEEP_NOW"
 
-                telegram_send \
-                  "🛑 Stop without backup selected. Is baar backup nahi liya jayega." \
-                  || true
+              ELAPSED=$((ELAPSED + SLEEP_NOW))
+
+              run_backup_safely \
+                "35-minute automatic backup"
+
+            done
+
+          ) &
+
+          TIMER_PID=$!
+
+
+          # ========================================================
+          # RDP CONNECT / DISCONNECT MONITOR
+          # ========================================================
+
+          (
+            WAS_CONNECTED=0
+            NOW_SECONDS=0
+
+            while [ "$NOW_SECONDS" -lt "$TOTAL_SECONDS" ]; do
+
+              sleep 10
+
+              NOW_SECONDS=$((NOW_SECONDS + 10))
+
+
+              ACTIVE=$(
+                sudo ss \
+                  -Htn \
+                  state established \
+                  '( sport = :3389 or dport = :3389 )' \
+                  2>/dev/null \
+                  | wc -l
+              )
+
+
+              if [ "$ACTIVE" -gt 0 ] &&
+                 [ "$WAS_CONNECTED" -eq 0 ]; then
+
+                WAS_CONNECTED=1
+
+                notify_telegram \
+                  "🟢 RDP connected. Enjoy your Windows VPS."
+
+
+              elif [ "$ACTIVE" -eq 0 ] &&
+                   [ "$WAS_CONNECTED" -eq 1 ]; then
+
+                WAS_CONNECTED=0
+
+                notify_telegram \
+                  "👋 RDP disconnected."
+
+
+                notify_telegram \
+                  "🔄 RDP disconnect detected. Emergency backup is being taken now."
+
+                run_backup_safely \
+                  "RDP disconnect"
 
               fi
 
-              break
+            done
+
+          ) &
+
+          MONITOR_PID=$!
+
+
+          # ========================================================
+          # WAIT
+          # ========================================================
+
+          wait "$TIMER_PID" "$MONITOR_PID"
+
+
+      # ============================================================
+      # 19. EMERGENCY BACKUP ON CANCEL / FAILURE
+      # ============================================================
+      #
+      # IMPORTANT:
+      # GitHub cancellation is not an unlimited grace period.
+      # This step is best-effort.
+      # ============================================================
+
+      - name: Emergency backup after cancellation or failure
+        if: ${{ cancelled() || failure() }}
+        continue-on-error: true
+        run: |
+
+          NOW=$(date '+%I:%M:%S %p')
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode \
+            "text=${NOW} : 🚨 Workflow stopped/cancelled. Emergency backup is being attempted now." \
+            > /dev/null || true
+
+
+          LOCKFILE=/tmp/emergency-backup.lock
+
+          exec 9>"$LOCKFILE"
+
+          if flock -n 9; then
+
+            # Windows backup
+            if [ -d /opt/windows ] &&
+               [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
+
+              sudo docker pause windows \
+                2>/dev/null || true
+
+              rm -f ~/windows-backup.tar.gz
+
+              if sudo tar \
+                --sparse \
+                -czf ~/windows-backup.tar.gz \
+                -C /opt windows; then
+
+                sudo docker unpause windows \
+                  2>/dev/null || true
+
+                sudo chown \
+                  "$USER:$USER" \
+                  ~/windows-backup.tar.gz \
+                  2>/dev/null || true
+
+
+                curl -s -X POST \
+                  "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d chat_id="${TELEGRAM_CHAT_ID}" \
+                  --data-urlencode \
+                  "text=$(date '+%I:%M:%S %p') : ⬆️ Emergency Windows backup upload is starting." \
+                  > /dev/null || true
+
+
+                rclone copyto \
+                  ~/windows-backup.tar.gz \
+                  gdrive:windows-backup.tar.gz \
+                  --ignore-times \
+                  --progress \
+                  --retries 3 \
+                  --low-level-retries 5 \
+                  || true
+
+              else
+
+                sudo docker unpause windows \
+                  2>/dev/null || true
+
+              fi
+
             fi
 
 
-            # ======================================================
-            # 35-MINUTE BACKUP
-            # ======================================================
+            # Tailscale state
+            if [ -f /var/lib/tailscale/tailscaled.state ]; then
 
-            ELAPSED=$((NOW_SECONDS - LAST_BACKUP))
+              sudo mkdir -p /tmp/ts-state
 
-            if [ "$ELAPSED" -ge "$BACKUP_INTERVAL" ]; then
+              sudo cp \
+                /var/lib/tailscale/tailscaled.state \
+                /tmp/ts-state/ \
+                2>/dev/null || true
 
-              echo "35-minute backup timer triggered."
+              rm -f ~/tailscale-state.tar.gz
 
-              run_backup "35-minute timer" || true
+              sudo tar \
+                --sparse \
+                -czf ~/tailscale-state.tar.gz \
+                -C /tmp/ts-state . \
+                2>/dev/null || true
 
-              LAST_BACKUP=$(date +%s)
+              sudo chown \
+                "$USER:$USER" \
+                ~/tailscale-state.tar.gz \
+                2>/dev/null || true
 
-            fi
-
-
-            # ======================================================
-            # RDP CONNECTION DETECTION
-            # ======================================================
-
-            CONNECTIONS=$(sudo ss -Htn state established \
-              '( sport = :3389 or dport = :3389 )' \
-              2>/dev/null \
-              | awk '
-                {
-                  local_addr=$4
-                  remote_addr=$5
-
-                  if (
-                    local_addr !~ /^127\.0\.0\.1:/ &&
-                    local_addr !~ /^\[::1\]:/
-                  ) {
-                    count++
-                  }
-                }
-                END {
-                  print count+0
-                }
-              ')
-
-
-            CONNECTIONS=${CONNECTIONS:-0}
-
-
-            # ------------------------------------------------------
-            # RDP CONNECTED
-            # ------------------------------------------------------
-
-            if [ "$CONNECTIONS" -gt 0 ] &&
-               [ "$WAS_CONNECTED" -eq 0 ]; then
-
-              WAS_CONNECTED=1
-
-              echo "RDP connection detected."
-
-              telegram_send \
-                "🟢 RDP CONNECTED. Your Windows VPS is being used." \
+              rclone copyto \
+                ~/tailscale-state.tar.gz \
+                gdrive:tailscale-state.tar.gz \
+                --ignore-times \
+                --progress \
+                --retries 3 \
+                --low-level-retries 5 \
                 || true
 
             fi
 
 
-            # ------------------------------------------------------
-            # RDP DISCONNECTED
-            # ------------------------------------------------------
+            NOW=$(date '+%I:%M:%S %p')
 
-            if [ "$CONNECTIONS" -eq 0 ] &&
-               [ "$WAS_CONNECTED" -eq 1 ]; then
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : 🛡️ Emergency backup attempt finished." \
+              > /dev/null || true
 
-              WAS_CONNECTED=0
+          else
 
-              echo "RDP disconnected."
+            NOW=$(date '+%I:%M:%S %p')
 
-              telegram_send \
-                "🔴 RDP DISCONNECTED. Automatic backup is starting now." \
-                || true
-
-              run_backup "RDP disconnect" || true
-
-              LAST_BACKUP=$(date +%s)
-
-            fi
-
-
-            sleep 5
-
-          done
-
-
-          # ========================================================
-          # CONTROLLED STOP
-          # ========================================================
-
-          echo "Controlled shutdown requested."
-
-          echo "CONTROLLED_STOP=1" >> "$GITHUB_ENV"
-
-          if [ "$CONTROLLED_STOP" -eq 1 ]; then
-
-            if [ -f "/tmp/vps-stop-request" ]; then
-              rm -f "/tmp/vps-stop-request"
-            fi
-
-            telegram_send \
-              "⏹️ VPS shutdown process started." \
-              || true
+            curl -s -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              --data-urlencode \
+              "text=${NOW} : ℹ️ Another backup was already running, so the emergency backup was skipped." \
+              > /dev/null || true
 
           fi
 
 
       # ============================================================
-      # 19. STOP WINDOWS SAFELY
+      # 20. NORMAL FINAL BACKUP
       # ============================================================
 
-      - name: Stop Windows safely
+      - name: Final backup before normal shutdown
         if: ${{ success() }}
+        continue-on-error: true
         run: |
-          set -u
 
-          source /tmp/telegram_functions.sh
+          NOW=$(date '+%I:%M:%S %p')
 
-          if docker inspect windows >/dev/null 2>&1; then
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode \
+            "text=${NOW} : 🔄 Session ending. Final backup is being taken now." \
+            > /dev/null || true
 
-            RUNNING=$(docker inspect \
-              -f '{{.State.Running}}' \
-              windows 2>/dev/null || echo false)
 
-            if [ "$RUNNING" = "true" ]; then
+          if [ -d /opt/windows ] &&
+             [ "$(ls -A /opt/windows 2>/dev/null)" ]; then
 
-              telegram_send \
-                "⏹️ Windows container ko safely stop kiya ja raha hai..." \
+            sudo docker pause windows \
+              2>/dev/null || true
+
+            rm -f ~/windows-backup.tar.gz
+
+            if sudo tar \
+              --sparse \
+              -czf ~/windows-backup.tar.gz \
+              -C /opt windows; then
+
+              sudo docker unpause windows \
+                2>/dev/null || true
+
+              sudo chown \
+                "$USER:$USER" \
+                ~/windows-backup.tar.gz \
+                2>/dev/null || true
+
+              rclone copyto \
+                ~/windows-backup.tar.gz \
+                gdrive:windows-backup.tar.gz \
+                --ignore-times \
+                --progress \
+                --retries 5 \
+                --low-level-retries 10 \
                 || true
 
-              timeout 150 \
-                docker stop --time 120 windows \
-                || true
+            else
+
+              sudo docker unpause windows \
+                2>/dev/null || true
 
             fi
 
           fi
 
-          docker rm windows 2>/dev/null || true
-
-          telegram_send \
-            "✅ Windows stopped safely." \
-            || true
-
-
-      # ============================================================
-      # 20. SAVE TAILSCALE STATE
-      # ============================================================
-
-      - name: Save Tailscale state
-        if: ${{ success() }}
-        run: |
-          set -u
-
-          source /tmp/telegram_functions.sh
-
-          mkdir -p /tmp/tailscale-backup
 
           if [ -f /var/lib/tailscale/tailscaled.state ]; then
 
+            sudo mkdir -p /tmp/ts-state
+
+            sudo cp \
+              /var/lib/tailscale/tailscaled.state \
+              /tmp/ts-state/ \
+              2>/dev/null || true
+
+            rm -f ~/tailscale-state.tar.gz
+
             sudo tar \
-              -czf /tmp/tailscale-state.tar.gz \
-              -C /var/lib/tailscale \
-              tailscaled.state
+              --sparse \
+              -czf ~/tailscale-state.tar.gz \
+              -C /tmp/ts-state . \
+              2>/dev/null || true
+
+            sudo chown \
+              "$USER:$USER" \
+              ~/tailscale-state.tar.gz \
+              2>/dev/null || true
 
             rclone copyto \
-              /tmp/tailscale-state.tar.gz \
+              ~/tailscale-state.tar.gz \
               gdrive:tailscale-state.tar.gz \
-              --retries 3 \
+              --ignore-times \
+              --progress \
+              --retries 5 \
               --low-level-retries 10 \
-              || true
-
-            telegram_send \
-              "🌐 Tailscale state saved for the next VPS run." \
               || true
 
           fi
 
 
-      # ============================================================
-      # 21. FINAL TELEGRAM
-      # ============================================================
+          NOW=$(date '+%I:%M:%S %p')
 
-      - name: Final Telegram notification
-        if: ${{ success() }}
-        run: |
-          set -u
-
-          source /tmp/telegram_functions.sh
-
-          telegram_send \
-            "🏁 VPS workflow has finished. The Windows VPS has been stopped cleanly." \
-            || true
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode \
+            "text=${NOW} : ✅ Final backup attempt finished." \
+            > /dev/null || true
 
 
       # ============================================================
-      # 22. BEST-EFFORT EMERGENCY NOTICE ON FAILURE/CANCEL
+      # 21. STOP WINDOWS
       # ============================================================
 
-      - name: Emergency Telegram notification
-        if: ${{ failure() || cancelled() }}
+      - name: Stop Windows cleanly
+        if: ${{ always() }}
         continue-on-error: true
         run: |
-          set -u
 
-          source /tmp/telegram_functions.sh
+          NOW=$(date '+%I:%M:%S %p')
 
-          telegram_send \
-            "⚠️ GitHub workflow failure/cancellation detected. The automatic controlled Telegram shutdown was not used. Please check the Actions log." \
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode \
+            "text=${NOW} : 🛑 Windows VPS is being stopped cleanly." \
+            > /dev/null || true
+
+
+          timeout 60 \
+            sudo docker stop windows \
             || true
+
+
+          sudo docker kill windows \
+            2>/dev/null || true
+
+
+          sleep 5
+
+
+      # ============================================================
+      # 22. FINISHED
+      # ============================================================
+
+      - name: Notify - session finished
+        if: ${{ success() }}
+        run: |
+
+          NOW=$(date '+%I:%M:%S %p')
+
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode \
+            "text=${NOW} : ✅ VPS session finished successfully. Final backup was attempted." \
+            > /dev/null || true
