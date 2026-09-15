@@ -1,42 +1,7 @@
-
-pencil accessory
-/
-name Continuous Persistent VPS
-.txt
-maine tumko ak code diya hai isse aache se analyze karo phir mai jaise bataunga vaise karna thik
-6:41 PM
-Thought
-Bilkul—main pehle diye gaye code ko dhyān se analyze karunga, uski structure, flow, dependencies aur possible issues samajhunga. Abhi koi modification nahi karunga; uske baad aap jaise instructions denge, vaise hi kaam karunga.
-Haan, maine poora 667-line GitHub Actions workflow analyze kar liya hai. Isme mainly:
-Tailscale identity restore/backup
-Ubuntu runner ko VPS host banana
-Dockur Windows 11 container
-Google Drive se persistent Windows restore/backup
-RDP readiness aur connection monitoring
-Telegram notifications aur /stop controls
-Periodic, disconnect, cancellation aur final backups
-ka flow hai. Embedded Telegram Python listener bhi decode karke check kiya—uski syntax valid hai. YAML structure bhi parse ho rahi hai.
-Kuch reliability/security edge cases bhi identify kiye hain, especially backup verification, cancellation locking, Drive cleanup aur failure handling se related. Abhi maine code mein koi change nahi kiya hai. Aap jaise kahenge, main exactly vaise hi modify karunga.
-is code ko jab mai run kar raha hu to phir jab usse cancel karke dusri bar run kar raha hu to tailscale ki ip bar bar change ho ja rahi hai to aisa karo ki jaise hi mai run karu isse turant us tailscale ka backup leke or google drive per upload karde ki phir jab mai run karu to usi backup ko load karke vahi ip mile change na ho ip or kuch mat chedna bas ye sahi karke de do ha ye bhi add kardo ki or ha pahle baar jab run karunga to backup banega kyoki pahle se backup nahi bana hoga to phir jab mai agli bar run karu to pahle check kare ki ip hai ki nahi backup agar nahi ho to ak nya ip karke phir backup chada de agar hoga to usse load karle or same ip use karne lage vo backup chafhane wala kaam na kare thik full code do or kuch bhi mat badlna or ha jab ye ip wala backup jab load ho to telegram pe massage aaye jaise sab me ho raha hai or agar nahi mila jab backup banke drive per chadh raha hoga tab bhi massage kare full code do ab or jaisa hai vaise hi full code chahiye bas ye feature add karke full code do sub same hi rahe full code vaisa ka vaise hu ho kuch bhi badlana mat bas ye features add karke full code do idam working or kuch mat chedna bas ye feater add kardo ki ip change na hoi bar bar full code working code  do
-6:45 PM
-Main sirf Tailscale restore/start/first-time backup wale blocks update kar raha hoon. Baaki workflow ko bilkul unchanged rakhunga, phir YAML aur embedded listener validate karke full code file dunga.
-Continuous-Persistent-VPS-fixed
-.yml
-Full working code ready hai: [Continuous-Persistent-VPS-fixed.yml](attachment:d7289f66-06dd-414d-95d5-a386414ceb54:Continuous-Persistent-VPS-fixed.yml)
-Sirf requested Tailscale feature modify kiya hai:
-First run: Nayi Tailscale identity/IP banegi aur turant Google Drive par backup upload hoga.
-Next runs: Existing backup restore hoga aur wahi saved identity/IP use hogi.
-Backup milne par dobara overwrite/upload nahi hoga.
-Backup load, new identity creation, upload success aur failure ke Telegram messages add kiye hain.
-Restored identity par auth key dobara apply nahi hogi, jisse nayi identity/IP banne ka risk nahi rahega.
-Baaki poora workflow unchanged hai.
-YAML aur embedded Telegram Python listener validate kar diye hain.
-Research
-Continuous-Persistent-VPS-fixed.yml
 name: Continuous Persistent VPS
 ​
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 ​
 concurrency:
   group: vps-session
