@@ -31,16 +31,21 @@ jobs:
       # STEP 1: CHECKOUT REPO
       # ============================================================
       - name: 📥 Checkout repo
-        uses: actions/checkout@v4
+        run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🙏 Namaste Sir! Aapka workflow start ho gaya hai. Ab hum Step 1 (Checkout repo) par badh rahe hain." > /dev/null || true
+          echo "Checked out successfully"
 
       # ============================================================
       # STEP 2: SETUP TOOLS & SMART PROGRESS SCRIPT
       # ============================================================
       - name: 🛠️ Setup Tools & Progress Script
         run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚙️ Ab hum Step 2 (Setup Tools & Progress Script) par badh rahe hain. Tools install kiye ja rahe hain..." > /dev/null || true
+
           sudo apt-get update && sudo apt-get install -y tmux python3 curl unzip net-tools neofetch iproute2 xxd jq util-linux zstd
           
-          # Smart Progress Script for Live Upload Percentages
           cat << 'EOF' | sudo tee /usr/local/bin/rclone_progress.sh >/dev/null
           #!/bin/bash
           SRC="$1"
@@ -55,12 +60,15 @@ jobs:
           
           while kill -0 $PID 2>/dev/null; do
               sleep 5
-              PCT=$(tail -n 5 "$LOG" 2>/dev/null | grep -oE '[0-9]+%' | tail -1 | tr -d '%' || true)
+              LINE=$(tail -n 5 "$LOG" 2>/dev/null || true)
+              PCT=$(echo "$LINE" | grep -oE '[0-9]+%' | tail -1 | tr -d '%' || true)
+              ETA=$(echo "$LINE" | grep -oE 'ETA [0-9msdhm:]+' | tail -1 || echo "calculating...")
+              
               if [[ "$PCT" =~ ^[0-9]+$ ]]; then
-                  if [ "$PCT" -ge $((LAST_PCT + 20)) ] && [ "$PCT" -lt 100 ]; then
+                  if [ "$PCT" -ge $((LAST_PCT + 10)) ] && [ "$PCT" -lt 100 ]; then
                       NOW=$(date '+%I:%M:%S %p')
-                      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ ${MSG} : ${PCT}% Complete..." > /dev/null || true
-                      LAST_PCT=$((PCT / 20 * 20))
+                      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ Sir, ${MSG} : ${PCT}% complete ho gaya hai! Estimated time (ETA): ${ETA}." > /dev/null || true
+                      LAST_PCT=$((PCT / 10 * 10))
                   fi
               fi
           done
@@ -76,6 +84,9 @@ jobs:
       # ============================================================
       - name: 🤖 Start Telegram Command Listener
         run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🤖 Ab hum Step 3 (Start Telegram Command Listener) par badh rahe hain. Bot active kiya ja raha hai..." > /dev/null || true
+
           cat << EOF > /tmp/telegram_listener.py
           import json, os, time, urllib.request, urllib.parse
           BOT_TOKEN = "${TELEGRAM_BOT_TOKEN}"
@@ -142,102 +153,128 @@ jobs:
           EOF
           
           tmux new-session -d -s tgbot 'python3 /tmp/telegram_listener.py'
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🚀 System Booting! Telegram Bot Active. Type /stop anytime." > /dev/null || true
 
       # ============================================================
-      # STEP 4: RESTORE TAILSCALE (Old Reliable Method)
+      # STEP 4: RESTORE TAILSCALE IDENTITY
       # ============================================================
       - name: 📡 Restore Tailscale Identity
         run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 📡 Ab hum Step 4 (Restore Tailscale Identity) par badh rahe hain. Google Drive se Tailscale check kiya ja raha hai..." > /dev/null || true
+
           sudo hostnamectl set-hostname biralo
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl stop tailscaled 2>/dev/null || true
           
           mkdir -p ./restore
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🔎 Checking Drive for Tailscale backup..." > /dev/null || true
-          
           FOUND=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)tailscale-state\.tar\.gz$' | head -1 || true)
           if [ -n "$FOUND" ]; then
             rclone copyto "gdrive:${FOUND}" "./restore/tailscale-state.tar.gz"
             sudo rm -rf /var/lib/tailscale/* 2>/dev/null || true
             sudo mkdir -p /var/lib/tailscale
             sudo tar -xzf ./restore/tailscale-state.tar.gz -C /var/lib/
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Tailscale Identity Restored." > /dev/null || true
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, Tailscale identity successfully restore ho gayi hai." > /dev/null || true
             echo "TAILSCALE_STATUS=restored" >> "$GITHUB_ENV"
           else
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ℹ️ No Tailscale Backup. Creating Fresh Identity..." > /dev/null || true
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ℹ️ Sir, koi purana Tailscale backup nahi mila, fresh identity banayi ja rahi hai." > /dev/null || true
             echo "TAILSCALE_STATUS=fresh" >> "$GITHUB_ENV"
           fi
 
       # ============================================================
-      # STEP 5: START TAILSCALE
+      # STEP 5: START TAILSCALE NETWORK
       # ============================================================
       - name: 🌐 Start Tailscale Network
         run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🌐 Ab hum Step 5 (Start Tailscale Network) par badh rahe hain. Tailscale online kiya ja raha hai..." > /dev/null || true
+
           sudo systemctl start tailscaled
           sleep 5
           sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=biralo --ssh
           sleep 10
           TS_IP=$(tailscale ip -4 2>/dev/null || echo "not available")
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🌐 Tailscale Online! Connect IP: ${TS_IP}" > /dev/null || true
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🌐 Tailscale Online! Aapka IP hai: ${TS_IP}" > /dev/null || true
 
       # ============================================================
-      # STEP 6: INITIAL TAILSCALE BACKUP (IF FRESH)
+      # STEP 6: INITIAL TAILSCALE BACKUP
       # ============================================================
       - name: 💾 Initial Tailscale Backup
         run: |
           if [ "${TAILSCALE_STATUS}" = "fresh" ]; then
-             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 💾 Taking initial backup of new Tailscale IP..." > /dev/null || true
+             NOW=$(date '+%I:%M:%S %p')
+             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 💾 Sir, aapka naya Tailscale IP setup ho gaya hai, isliye ab hum iska backup Google Drive par le rahe hain." > /dev/null || true
+             
              sudo tar -czf /tmp/tailscale-state.tar.gz -C /var/lib tailscale 2>/dev/null || true
              rclone copyto /tmp/tailscale-state.tar.gz gdrive:tailscale-state.tar.gz --ignore-times
-             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Initial Tailscale backup saved to Drive." > /dev/null || true
+             
+             NOW=$(date '+%I:%M:%S %p')
+             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, Tailscale ka backup successfully Google Drive par save ho gaya hai." > /dev/null || true
           else
              echo "Identity restored, skipping initial backup."
           fi
 
       # ============================================================
-      # STEP 7: RESTORE WINDOWS (Original Reliable Logic + Both Formats)
+      # STEP 7: RESTORE WINDOWS DATA
       # ============================================================
-      - name: 🪟 Check & Download Windows
+      - name: 🪟 Check & Download Windows Data
         run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🪟 Ab hum Step 7 (Check & Download Windows Data) par badh rahe hain. Google Drive check kiya ja raha hai..." > /dev/null || true
+
           sudo sysctl -w net.ipv4.ip_forward=1
           docker image prune --all --force 2>/dev/null || true
           mkdir -p ./restore
-          
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🔍 Checking Drive for Windows Data..." > /dev/null || true
           
           FOUND_ZST=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)windows-backup\.tar\.zst$' | head -1 || true)
           FOUND_GZ=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)windows-backup\.tar\.gz$' | head -1 || true)
 
           if [ -n "$FOUND_ZST" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⬇️ ZST Backup found. Downloading now..." > /dev/null || true
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⬇️ Sir, Windows ka ZST backup mil gaya hai! Download shuru ho raha hai..." > /dev/null || true
+            
             rclone copyto "gdrive:${FOUND_ZST}" "./restore/windows-backup.tar.zst" --stats 5s
             
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🛠️ Download complete! Ab Windows data extract kiya ja raha hai..." > /dev/null || true
+            
             sudo rm -rf /opt/windows && sudo mkdir -p /opt/windows
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🛠️ Extracting ZST Data..." > /dev/null || true
             sudo tar -I zstd -xf "./restore/windows-backup.tar.zst" -C /opt/
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 📦 Windows Data extracted successfully." > /dev/null || true
+            
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, Windows data successfully extract ho gaya hai." > /dev/null || true
 
           elif [ -n "$FOUND_GZ" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⬇️ Legacy GZ Backup found. Downloading now..." > /dev/null || true
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⬇️ Sir, Windows ka Legacy GZ backup mil gaya hai! Download shuru ho raha hai..." > /dev/null || true
+            
             rclone copyto "gdrive:${FOUND_GZ}" "./restore/windows-backup.tar.gz" --stats 5s
             
             sudo rm -rf /opt/windows && sudo mkdir -p /opt/windows
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🛠️ Extracting GZ Data..." > /dev/null || true
             sudo tar -xzf "./restore/windows-backup.tar.gz" -C /opt/
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 📦 Windows Data extracted successfully." > /dev/null || true
-
+            
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, Legacy Windows data successfully extract ho gaya hai." > /dev/null || true
           else
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ℹ️ No Windows backup found. Starting fresh." > /dev/null || true
+            NOW=$(date '+%I:%M:%S %p')
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ℹ️ Sir, koi purana Windows backup nahi mila, fresh Windows setup shuru kiya ja raha hai." > /dev/null || true
           fi
 
       # ============================================================
-      # STEP 8: START WINDOWS & WAIT FOR RDP
+      # STEP 8: START WINDOWS & RDP CHECK (With Progress Updates)
       # ============================================================
       - name: 🚀 Start Windows & RDP Check
         run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🚀 Ab hum Step 8 (Start Windows & RDP Check) par badh rahe hain. Windows engine pull kiya ja raha hai..." > /dev/null || true
+
           docker pull ghcr.io/dockur/windows
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🪟 Booting up Windows Engine..." > /dev/null || true
+
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🪟 Windows image download ho gayi hai! Ab container boot kiya ja raha hai..." > /dev/null || true
+
           docker rm -f windows 2>/dev/null || true
           docker run -d --name windows \
             -e VERSION="11" \
@@ -253,6 +290,9 @@ jobs:
             --cap-add NET_ADMIN \
             ghcr.io/dockur/windows
 
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ Container boot ho gaya hai! Ab Windows 11 load ho raha hai aur RDP port (3389) ka wait kiya ja raha hai (Isme 5-8 minute lag sakte hain, kripya thoda sabra karein)..." > /dev/null || true
+
           READY=0
           STABLE_COUNT=0
           for i in $(seq 1 180); do
@@ -263,53 +303,55 @@ jobs:
           done
           
           TS_IP=$(tailscale ip -4 2>/dev/null || echo "not available")
+          NOW=$(date '+%I:%M:%S %p')
           if [ "$READY" = "1" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🖥️ RDP is 100% Ready! Connect via IP: ${TS_IP}" > /dev/null || true
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🖥️ Sir, Windows RDP 100% ready hai! Aap Tailscale IP (${TS_IP}) se connect kar sakte hain." > /dev/null || true
           else
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⚠️ RDP check timeout. Try connecting anyway: ${TS_IP}" > /dev/null || true
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚠️ RDP check time le raha hai, lekin aap Tailscale IP (${TS_IP}) se try kar sakte hain." > /dev/null || true
           fi
 
       # ============================================================
-      # STEP 9: MAIN LOOP CONTROLLER (Double Backup + Verbose Msgs)
+      # STEP 9: MAIN CONTROLLER & DETAILED MESSAGING LOOP
       # ============================================================
-      - name: 🔄 Main Loop (Monitor & Double Backup)
+      - name: 🔄 Main Loop (Monitor, RDP Events & Double Backup)
         run: |
           touch /tmp/main_loop_started
           
           notify_telegram() { curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : $1" > /dev/null || true; }
 
           backup_now() {
-            notify_telegram "🔄 DOUBLE BACKUP TRIGGERED (Reason: $1)"
+            REASON="$1"
+            notify_telegram "🔄 Sir, aapka backup liya ja raha hai! Reason: ${REASON}."
+            notify_telegram "⏳ Kuch time ke liye aapka RDP temporarily pause/band rahega taaki data safe rahe."
             
-            # Tailscale Backup Phase
-            notify_telegram "1️⃣ Backing up Tailscale Folder..."
+            # 1. Tailscale Backup
+            notify_telegram "📡 Sir, abhi Tailscale ka backup liya ja raha hai..."
             if [ -d /var/lib/tailscale ]; then
                sudo tar -czf /tmp/tailscale-state.tar.gz -C /var/lib tailscale 2>/dev/null || true
                rclone copyto /tmp/tailscale-state.tar.gz gdrive:tailscale-state.tar.gz --ignore-times 2>/dev/null || true
-               notify_telegram "✅ Tailscale Backup complete!"
+               notify_telegram "✅ Tailscale ka backup successfully ban gaya hai!"
             fi
             
-            # Windows Backup Phase
-            notify_telegram "2️⃣ Pausing Windows for Data Safety..."
+            # 2. Windows Backup & Compression
+            notify_telegram "🪟 Sir, ab Windows ka backup banaya ja raha hai. Estimated time: ~2 minutes. RDP thodi der ke liye band hai..."
             sudo docker pause windows 2>/dev/null || true
             rm -f /tmp/windows-backup.tar.zst
-            notify_telegram "🗜️ Compressing Windows (ZSTD Fast Mode)..."
             
             if sudo tar --sparse -I 'zstd -T0 -3' -cf /tmp/windows-backup.tar.zst -C /opt windows; then
                sudo docker unpause windows 2>/dev/null || true
-               notify_telegram "▶️ Windows Resumed. Starting Upload to Drive..."
+               notify_telegram "✅ Sir, Windows ka backup ban gaya hai! Ab hum ise Google Drive par upload kar rahe hain..."
                
-               # Progress Tracking during upload
-               if /usr/local/bin/rclone_progress.sh "/tmp/windows-backup.tar.zst" "gdrive:windows-backup.tar.zst.tmp" "Uploading Windows"; then
+               # Live uploading percentages with ETA
+               if /usr/local/bin/rclone_progress.sh "/tmp/windows-backup.tar.zst" "gdrive:windows-backup.tar.zst.tmp" "Uploading Windows Backup"; then
                   rclone moveto "gdrive:windows-backup.tar.zst.tmp" "gdrive:windows-backup.tar.zst"
                   rclone cleanup gdrive: 2>/dev/null || true
-                  notify_telegram "✅ DOUBLE BACKUP FINISHED & SECURED!"
+                  notify_telegram "🎉 Sir, backup aur uploading dono complete ho gaye hain! Bas 1-2 minute me RDP phir se boot ho raha hai."
                   touch /tmp/skip_final_backup
                   return 0
                fi
             fi
             sudo docker unpause windows 2>/dev/null || true
-            notify_telegram "❌ Windows Backup Failed during process!"
+            notify_telegram "❌ Sir, backup process me kuch error aa gaya tha."
             return 1
           }
 
@@ -341,19 +383,20 @@ jobs:
 
             ELAPSED_SINCE_BACKUP=$((CURRENT_TIME - LAST_BACKUP_TIME))
             if [ "$ELAPSED_SINCE_BACKUP" -ge "$BACKUP_INTERVAL" ]; then
-               backup_now "35-Minute Timer"
+               backup_now "35-Minute Auto Timer"
                LAST_BACKUP_TIME=$(date +%s)
                rm -f /tmp/skip_final_backup
             fi
 
+            # Real-time RDP Connection Tracker
             ACTIVE=$(sudo ss -Htn state established '( sport = :3389 or dport = :3389 )' 2>/dev/null | wc -l)
             if [ "$ACTIVE" -gt 0 ] && [ "$WAS_CONNECTED" -eq 0 ]; then
                WAS_CONNECTED=1
-               notify_telegram "🟢 User Connected via RDP."
+               notify_telegram "👋 Sir namaste! Thanks for joining my system. RDP successfully connected!"
             elif [ "$ACTIVE" -eq 0 ] && [ "$WAS_CONNECTED" -eq 1 ]; then
                WAS_CONNECTED=0
-               notify_telegram "👋 RDP Disconnected."
-               backup_now "Safety disconnect backup"
+               notify_telegram "👋 Sir, thanks for coming! Aap RDP se disconnect ho gaye hain. Phir se aaiyega!"
+               backup_now "RDP Disconnect Safety Trigger"
                LAST_BACKUP_TIME=$(date +%s)
                rm -f /tmp/skip_final_backup
             fi
@@ -371,7 +414,8 @@ jobs:
              exit 0
           fi
           
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🚨 Workflow closing! Forcing Final Safety Backup." > /dev/null || true
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🚨 Sir, session close ho raha hai! Aapka final emergency backup liya ja raha hai..." > /dev/null || true
           
           if [ -d /var/lib/tailscale ]; then
              sudo tar -czf /tmp/tailscale-state.tar.gz -C /var/lib tailscale 2>/dev/null || true
@@ -397,4 +441,5 @@ jobs:
         run: |
           tmux kill-session -t tgbot 2>/dev/null || true
           timeout 60 sudo docker stop windows || true
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Server shut down completely. See you next time!" > /dev/null || true
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, server puri tarah se shutdown ho gaya hai. Have a great day, phir milenge!" > /dev/null || true
