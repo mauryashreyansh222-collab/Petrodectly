@@ -28,19 +28,19 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. CHECKOUT REPO
+      # STEP 1: CHECKOUT REPO
       # ============================================================
       - name: 📥 Checkout repo
         uses: actions/checkout@v4
 
       # ============================================================
-      # 2. SETUP TOOLS & SMART PROGRESS SCRIPT
+      # STEP 2: SETUP TOOLS & SMART PROGRESS SCRIPT
       # ============================================================
       - name: 🛠️ Setup Tools & Progress Script
         run: |
           sudo apt-get update && sudo apt-get install -y tmux python3 curl unzip net-tools neofetch iproute2 xxd jq util-linux zstd
           
-          # Smart Progress Script for Live Percentages (20%, 40%, 60%, 80%)
+          # Smart Progress Script for Live Upload Percentages
           cat << 'EOF' | sudo tee /usr/local/bin/rclone_progress.sh >/dev/null
           #!/bin/bash
           SRC="$1"
@@ -72,7 +72,7 @@ jobs:
           curl https://rclone.org/install.sh | sudo bash
 
       # ============================================================
-      # 3. START TELEGRAM BOT LISTENER
+      # STEP 3: START TELEGRAM BOT LISTENER
       # ============================================================
       - name: 🤖 Start Telegram Command Listener
         run: |
@@ -145,7 +145,7 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🚀 System Booting! Telegram Bot Active. Type /stop anytime." > /dev/null || true
 
       # ============================================================
-      # 4. RESTORE TAILSCALE FOLDER
+      # STEP 4: RESTORE TAILSCALE (Old Reliable Method)
       # ============================================================
       - name: 📡 Restore Tailscale Identity
         run: |
@@ -153,14 +153,15 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo systemctl stop tailscaled 2>/dev/null || true
           
+          mkdir -p ./restore
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🔎 Checking Drive for Tailscale backup..." > /dev/null || true
           
           FOUND=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)tailscale-state\.tar\.gz$' | head -1 || true)
           if [ -n "$FOUND" ]; then
-            rclone copyto "gdrive:${FOUND}" "/tmp/tailscale-state.tar.gz"
+            rclone copyto "gdrive:${FOUND}" "./restore/tailscale-state.tar.gz"
             sudo rm -rf /var/lib/tailscale/* 2>/dev/null || true
             sudo mkdir -p /var/lib/tailscale
-            sudo tar -xzf /tmp/tailscale-state.tar.gz -C /var/lib/
+            sudo tar -xzf ./restore/tailscale-state.tar.gz -C /var/lib/
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Tailscale Identity Restored." > /dev/null || true
             echo "TAILSCALE_STATUS=restored" >> "$GITHUB_ENV"
           else
@@ -169,7 +170,7 @@ jobs:
           fi
 
       # ============================================================
-      # 5. START TAILSCALE
+      # STEP 5: START TAILSCALE
       # ============================================================
       - name: 🌐 Start Tailscale Network
         run: |
@@ -181,7 +182,7 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🌐 Tailscale Online! Connect IP: ${TS_IP}" > /dev/null || true
 
       # ============================================================
-      # 6. INITIAL TAILSCALE BACKUP (IF FRESH)
+      # STEP 6: INITIAL TAILSCALE BACKUP (IF FRESH)
       # ============================================================
       - name: 💾 Initial Tailscale Backup
         run: |
@@ -195,33 +196,43 @@ jobs:
           fi
 
       # ============================================================
-      # 7. DOWNLOAD & RESTORE WINDOWS (With Loading %)
+      # STEP 7: RESTORE WINDOWS (Original Reliable Logic + Both Formats)
       # ============================================================
       - name: 🪟 Check & Download Windows
         run: |
           sudo sysctl -w net.ipv4.ip_forward=1
           docker image prune --all --force 2>/dev/null || true
+          mkdir -p ./restore
           
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🔍 Checking Drive for Windows Data..." > /dev/null || true
           
           FOUND_ZST=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)windows-backup\.tar\.zst$' | head -1 || true)
+          FOUND_GZ=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)windows-backup\.tar\.gz$' | head -1 || true)
 
           if [ -n "$FOUND_ZST" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⬇️ Windows Backup found. Download starting..." > /dev/null || true
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⬇️ ZST Backup found. Downloading now..." > /dev/null || true
+            rclone copyto "gdrive:${FOUND_ZST}" "./restore/windows-backup.tar.zst" --stats 5s
             
-            # Script will send 20%, 40% etc to Telegram
-            /usr/local/bin/rclone_progress.sh "gdrive:${FOUND_ZST}" "/tmp/windows-backup.tar.zst" "Downloading Windows"
-            
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🛠️ Download done! Extracting Data..." > /dev/null || true
             sudo rm -rf /opt/windows && sudo mkdir -p /opt/windows
-            sudo tar -I zstd -xf "/tmp/windows-backup.tar.zst" -C /opt/
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🛠️ Extracting ZST Data..." > /dev/null || true
+            sudo tar -I zstd -xf "./restore/windows-backup.tar.zst" -C /opt/
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 📦 Windows Data extracted successfully." > /dev/null || true
+
+          elif [ -n "$FOUND_GZ" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⬇️ Legacy GZ Backup found. Downloading now..." > /dev/null || true
+            rclone copyto "gdrive:${FOUND_GZ}" "./restore/windows-backup.tar.gz" --stats 5s
+            
+            sudo rm -rf /opt/windows && sudo mkdir -p /opt/windows
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🛠️ Extracting GZ Data..." > /dev/null || true
+            sudo tar -xzf "./restore/windows-backup.tar.gz" -C /opt/
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 📦 Windows Data extracted successfully." > /dev/null || true
+
           else
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ℹ️ No Windows backup found. Starting fresh." > /dev/null || true
           fi
 
       # ============================================================
-      # 8. START WINDOWS & WAIT FOR RDP
+      # STEP 8: START WINDOWS & WAIT FOR RDP
       # ============================================================
       - name: 🚀 Start Windows & RDP Check
         run: |
@@ -232,9 +243,9 @@ jobs:
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="13G" \
-            -e CPU_CORES="4" \
-            -e DISK_SIZE="110G" \
+            -e RAM_SIZE="8G" \
+            -e CPU_CORES="3" \
+            -e DISK_SIZE="60G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -v /opt/windows:/storage \
@@ -259,7 +270,7 @@ jobs:
           fi
 
       # ============================================================
-      # 9. MAIN LOOP CONTROLLER (Double Backup + Verbose Msgs)
+      # STEP 9: MAIN LOOP CONTROLLER (Double Backup + Verbose Msgs)
       # ============================================================
       - name: 🔄 Main Loop (Monitor & Double Backup)
         run: |
@@ -288,7 +299,7 @@ jobs:
                sudo docker unpause windows 2>/dev/null || true
                notify_telegram "▶️ Windows Resumed. Starting Upload to Drive..."
                
-               # Script will send 20%, 40% etc to Telegram
+               # Progress Tracking during upload
                if /usr/local/bin/rclone_progress.sh "/tmp/windows-backup.tar.zst" "gdrive:windows-backup.tar.zst.tmp" "Uploading Windows"; then
                   rclone moveto "gdrive:windows-backup.tar.zst.tmp" "gdrive:windows-backup.tar.zst"
                   rclone cleanup gdrive: 2>/dev/null || true
@@ -349,7 +360,7 @@ jobs:
           done
 
       # ============================================================
-      # 10. FINAL EMERGENCY BACKUP
+      # STEP 10: FINAL EMERGENCY BACKUP
       # ============================================================
       - name: 🚨 Final Emergency Backup
         if: always()
@@ -378,7 +389,7 @@ jobs:
           fi
 
       # ============================================================
-      # 11. CLEAN SHUTDOWN
+      # STEP 11: CLEAN SHUTDOWN
       # ============================================================
       - name: 🧹 Clean Shutdown
         if: always()
