@@ -152,7 +152,6 @@ jobs:
           sudo hostnamectl set-hostname biralo
           curl -fsSL https://tailscale.com/install.sh | sh
           
-          # Stop service to prevent read/write conflicts during restore
           sudo systemctl stop tailscaled 2>/dev/null || true
           
           FOUND=$(rclone lsf gdrive: --files-only -R 2>/dev/null | grep -E '(^|/)tailscale-state\.tar\.gz$' | head -1 || true)
@@ -223,9 +222,9 @@ jobs:
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="13G" \
-            -e CPU_CORES="4" \
-            -e DISK_SIZE="110G" \
+            -e RAM_SIZE="8G" \
+            -e CPU_CORES="3" \
+            -e DISK_SIZE="60G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -v /opt/windows:/storage \
@@ -377,5 +376,5 @@ jobs:
         continue-on-error: true
         run: |
           tmux kill-session -t tgbot 2>/dev/null || true
-          timeout 60 sudo docker stop windows || true
+          timeout 60 sudo docker stop windows || type exit 0
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ VPS session successfully finished and cleaned up. Have a great day!" > /dev/null || true
