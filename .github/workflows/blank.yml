@@ -80,6 +80,9 @@ jobs:
       # ============================================================
       - name: Start Tailscale
         run: |
+          # FIX: Pre-creating folder so Tailscale can save state to disk
+          sudo mkdir -p /var/lib/tailscale
+          
           sudo tailscaled &
           sleep 8
           sudo tailscale up --authkey "${{ secrets.TAILSCALE_AUTHKEY }}" --hostname=biralo --ssh
@@ -91,7 +94,7 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : 🌐 Tailscale Online. IP: ${TS_IP}" > /dev/null || true
 
       # ============================================================
-      # 6. BACKUP TAILSCALE IDENTITY
+      # 6. BACKUP TAILSCALE IDENTITY (With Error Check)
       # ============================================================
       - name: Backup Tailscale identity
         run: |
@@ -105,6 +108,9 @@ jobs:
             if rclone copyto ~/tailscale-state.tar.gz gdrive:tailscale-state.tar.gz --ignore-times --progress; then
                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Tailscale identity successfully backed up." > /dev/null || true
             fi
+          else
+            echo "❌ ERROR: Tailscale state file not found! Backup failed."
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ⚠️ Tailscale backup failed because state file wasn't created on disk." > /dev/null || true
           fi
 
       # ============================================================
@@ -201,7 +207,7 @@ jobs:
           fi
 
       # ============================================================
-      # 12. UNIFIED CONTROLLER LOOP (Absolute Time Fixed)
+      # 12. UNIFIED CONTROLLER LOOP
       # ============================================================
       - name: Main Controller (Monitor & Backup)
         run: |
