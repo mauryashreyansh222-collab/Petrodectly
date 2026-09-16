@@ -232,9 +232,9 @@ jobs:
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="8G" \
-            -e CPU_CORES="3" \
-            -e DISK_SIZE="60G" \
+            -e RAM_SIZE="13G" \
+            -e CPU_CORES="4" \
+            -e DISK_SIZE="110G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -v /opt/windows:/storage \
