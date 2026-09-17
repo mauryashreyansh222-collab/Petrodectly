@@ -34,6 +34,8 @@ jobs:
         run: |
           NOW=$(date '+%I:%M:%S %p')
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🙏 Namaste Sir! Aapka workflow start ho gaya hai. Ab hum Step 1 (Checkout repo) par badh rahe hain." > /dev/null || true
+          
+          # Actual checkout action handled by Github action itself, but we ensure repo is checked out
           echo "Checked out successfully"
 
       # ============================================================
@@ -46,6 +48,7 @@ jobs:
 
           sudo apt-get update && sudo apt-get install -y tmux python3 curl unzip net-tools neofetch iproute2 xxd jq util-linux zstd
           
+          # Smart Progress Script with Detailed Upload/Download Percentages & ETA calculation
           cat << 'EOF' | sudo tee /usr/local/bin/rclone_progress.sh >/dev/null
           #!/bin/bash
           SRC="$1"
@@ -235,7 +238,8 @@ jobs:
             NOW=$(date '+%I:%M:%S %p')
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⬇️ Sir, Windows ka ZST backup mil gaya hai! Download shuru ho raha hai..." > /dev/null || true
             
-            rclone copyto "gdrive:${FOUND_ZST}" "./restore/windows-backup.tar.zst" --stats 5s
+            # FIXED: Added Progress Script instead of raw rclone copy
+            /usr/local/bin/rclone_progress.sh "gdrive:${FOUND_ZST}" "./restore/windows-backup.tar.zst" "Downloading Windows Data"
             
             NOW=$(date '+%I:%M:%S %p')
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🛠️ Download complete! Ab Windows data extract kiya ja raha hai..." > /dev/null || true
@@ -250,7 +254,8 @@ jobs:
             NOW=$(date '+%I:%M:%S %p')
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⬇️ Sir, Windows ka Legacy GZ backup mil gaya hai! Download shuru ho raha hai..." > /dev/null || true
             
-            rclone copyto "gdrive:${FOUND_GZ}" "./restore/windows-backup.tar.gz" --stats 5s
+            # FIXED: Added Progress Script instead of raw rclone copy
+            /usr/local/bin/rclone_progress.sh "gdrive:${FOUND_GZ}" "./restore/windows-backup.tar.gz" "Downloading Legacy Windows Data"
             
             sudo rm -rf /opt/windows && sudo mkdir -p /opt/windows
             sudo tar -xzf "./restore/windows-backup.tar.gz" -C /opt/
@@ -280,9 +285,9 @@ jobs:
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="8G" \
-            -e CPU_CORES="3" \
-            -e DISK_SIZE="60G" \
+            -e RAM_SIZE="13G" \
+            -e CPU_CORES="4" \
+            -e DISK_SIZE="110G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -v /opt/windows:/storage \
@@ -335,7 +340,9 @@ jobs:
             # 2. Windows Backup & Compression
             notify_telegram "🪟 Sir, ab Windows ka backup banaya ja raha hai. Estimated time: ~2 minutes. RDP thodi der ke liye band hai..."
             sudo docker pause windows 2>/dev/null || true
-            rm -f /tmp/windows-backup.tar.zst
+            
+            # FIXED: Added sudo before rm
+            sudo rm -f /tmp/windows-backup.tar.zst
             
             if sudo tar --sparse -I 'zstd -T0 -3' -cf /tmp/windows-backup.tar.zst -C /opt windows; then
                sudo docker unpause windows 2>/dev/null || true
@@ -424,7 +431,10 @@ jobs:
 
           if [ -d /opt/windows ]; then
             sudo docker pause windows 2>/dev/null || true
-            rm -f /tmp/windows-backup.tar.zst
+            
+            # FIXED: Added sudo before rm
+            sudo rm -f /tmp/windows-backup.tar.zst
+            
             if sudo tar --sparse -I 'zstd -T0 -3' -cf /tmp/windows-backup.tar.zst -C /opt windows; then
               /usr/local/bin/rclone_progress.sh "/tmp/windows-backup.tar.zst" "gdrive:windows-backup.tar.zst.tmp" "Emergency Upload"
               rclone moveto "gdrive:windows-backup.tar.zst.tmp" "gdrive:windows-backup.tar.zst"
@@ -442,4 +452,4 @@ jobs:
           tmux kill-session -t tgbot 2>/dev/null || true
           timeout 60 sudo docker stop windows || true
           NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, server puri tarah se shutdown ho gaya hai. Have a great day, phir milenge!" > /dev/null || true
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ✅ Sir, RDP puri tarah se shutdown ho gaya hai. Have a great day, phir milenge!" > /dev/null || true
