@@ -36,6 +36,26 @@ jobs:
           echo "Checked out successfully"
 
       # ============================================================
+      # STEP 1.5: MAXIMIZE DISK SPACE (Fix for "No space left on device")
+      # ============================================================
+      - name: 🗑️ Maximize Disk Space
+        run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🧹 Server ki extra storage free ki ja rahi hai taaki DaVinci aur Claude ka heavy backup smooth ho..." > /dev/null || true
+          
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force
+          sudo apt-get clean
+          
+          echo "Disk space freed successfully:"
+          df -h
+
+      # ============================================================
       # STEP 2: SETUP TOOLS & SMART PROGRESS SCRIPT
       # ============================================================
       - name: 🛠️ Setup Tools & Progress Script
@@ -44,7 +64,6 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚙️ Ab hum Step 2 (Setup Tools) par badh rahe hain. Tools install ho rahe hain..." > /dev/null || true
           sudo apt-get update && sudo apt-get install -y tmux python3 curl unzip net-tools neofetch iproute2 xxd jq util-linux zstd
           
-          # ULTRA SMART PROGRESS SCRIPT (Bypasses Warnings & Extracts Exact Percentage)
           cat << 'EOF' | sudo tee /usr/local/bin/rclone_progress.sh >/dev/null
           #!/bin/bash
           SRC="$1"
@@ -59,7 +78,6 @@ jobs:
           
           while kill -0 $PID 2>/dev/null; do
               sleep 5
-              # Har warning bypass karke sirf exact percentage aur ETA filter karega
               LINE=$(grep "ETA" "$LOG" | tail -1 || true)
               PCT=$(echo "$LINE" | grep -oE '[0-9]+%' | tail -1 | tr -d '%' || true)
               ETA=$(echo "$LINE" | grep -oE 'ETA [0-9a-zA-Z:]+' | tail -1 || echo "calculating...")
@@ -264,14 +282,14 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🪟 Windows image download ho gayi hai! Ab container boot kiya ja raha hai..." > /dev/null || true
           docker rm -f windows 2>/dev/null || true
           
-          # FIXED RAM/CPU TO PREVENT GITHUB CRASH (Strictly for RDP)
+          # Virtual disk expanded to 80GB for heavy cache requirements
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="12G" \
+            -e RAM_SIZE="13G" \
             -e CPU_CORES="4" \
-            -e DISK_SIZE="100G" \
+            -e DISK_SIZE="90G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -v /opt/windows:/storage \
@@ -324,12 +342,10 @@ jobs:
             # 2. Windows Backup & Compression
             notify_telegram "🪟 Sir, ab Windows ka backup banaya ja raha hai. RDP thodi der ke liye safely stop ho raha hai..."
             
-            # FIXED: GRACEFUL SHUTDOWN (Prevents disk corruption and new VM load)
             timeout 90 sudo docker stop -t 60 windows 2>/dev/null || true
             sudo rm -f /tmp/windows-backup.tar.zst
             
             if sudo tar --sparse -I 'zstd -T0 -3' -cf /tmp/windows-backup.tar.zst -C /opt windows; then
-               # Start container safely again
                sudo docker start windows 2>/dev/null || true
                notify_telegram "✅ Sir, Windows ka clean backup ban gaya hai! Ab hum ise Google Drive par upload kar rahe hain..."
                
@@ -379,7 +395,6 @@ jobs:
                rm -f /tmp/skip_final_backup
             fi
             
-            # Pure RDP Port (3389) Connection Monitor
             ACTIVE=$(sudo ss -Htn state established '( sport = :3389 or dport = :3389 )' 2>/dev/null | wc -l)
             if [ "$ACTIVE" -gt 0 ] && [ "$WAS_CONNECTED" -eq 0 ]; then
                WAS_CONNECTED=1
