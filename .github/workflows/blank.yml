@@ -333,7 +333,7 @@ jobs:
             
             # 1. Tailscale Backup
             notify_telegram "📡 Sir, abhi Tailscale ka backup liya ja raha hai..."
-            if [ -d /var/lib/tailscale ]; then
+            if [ -d /var/lib/tailscale ]; then 
                sudo tar -czf /tmp/tailscale-state.tar.gz -C /var/lib tailscale 2>/dev/null || true
                rclone copyto /tmp/tailscale-state.tar.gz gdrive:tailscale-state.tar.gz --ignore-times 2>/dev/null || true
                notify_telegram "✅ Tailscale ka backup successfully ban gaya hai!"
@@ -364,11 +364,12 @@ jobs:
           
           START_TIME=$(date +%s)
           TOTAL_SECONDS=19500
-          BACKUP_INTERVAL=2100
+          BACKUP_INTERVAL=4200  # <-- CHANGE HERE: 4200 seconds = 70 minutes
           LAST_BACKUP_TIME=$START_TIME
           WAS_CONNECTED=0
           
-          notify_telegram "🟢 Controller Active. Auto Double-Backups set for every 35 mins."
+          # <-- CHANGE HERE: Telegram message updated
+          notify_telegram "🟢 Controller Active. Auto Double-Backups set for every 1 hour 10 mins (70 mins)."
           
           while true; do
             sleep 5
@@ -390,7 +391,8 @@ jobs:
             
             ELAPSED_SINCE_BACKUP=$((CURRENT_TIME - LAST_BACKUP_TIME))
             if [ "$ELAPSED_SINCE_BACKUP" -ge "$BACKUP_INTERVAL" ]; then
-               backup_now "35-Minute Auto Timer"
+               # <-- CHANGE HERE: Reason string updated
+               backup_now "70-Minute Auto Timer"
                LAST_BACKUP_TIME=$(date +%s)
                rm -f /tmp/skip_final_backup
             fi
