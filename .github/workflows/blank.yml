@@ -271,7 +271,7 @@ jobs:
           fi
 
       # ============================================================
-      # STEP 8: START WINDOWS & RDP CHECK (FIXED DISK SIZE & RAM)
+      # STEP 8: START WINDOWS & RDP CHECK (WITH EXTENDED BOOT TIMEOUT)
       # ============================================================
       - name: 🚀 Start Windows & RDP Check
         run: |
@@ -280,14 +280,15 @@ jobs:
           docker pull ghcr.io/dockur/windows
           docker rm -f windows 2>/dev/null || true
           
-          # Container with Fixed RAM (8G) and Original Disk Size (100G)
+          # Container with BOOT_TIMEOUT=600 to prevent QEMU auto-kill
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
             -e RAM_SIZE="8G" \
-            -e CPU_CORES="3" \
+            -e CPU_CORES="2" \
             -e DISK_SIZE="100G" \
+            -e BOOT_TIMEOUT="600" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -p 8006:8006/tcp \
