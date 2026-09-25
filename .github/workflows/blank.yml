@@ -36,12 +36,12 @@ jobs:
           echo "Checked out successfully"
 
       # ============================================================
-      # STEP 1.5: MAXIMIZE DISK SPACE (Fix for "No space left on device")
+      # STEP 1.5: MAXIMIZE DISK SPACE 
       # ============================================================
       - name: 🗑️ Maximize Disk Space
         run: |
           NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🧹 Server ki extra storage free ki ja rahi hai taaki DaVinci aur Claude ka heavy backup smooth ho..." > /dev/null || true
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🧹 Server ki extra storage free ki ja rahi hai taaki backup smooth ho..." > /dev/null || true
           
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -282,16 +282,18 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🪟 Windows image download ho gayi hai! Ab container boot kiya ja raha hai..." > /dev/null || true
           docker rm -f windows 2>/dev/null || true
           
-          # Virtual disk expanded to 80GB for heavy cache requirements
+          # FIXED: RAM aur CPU ko GitHub limits ke hisab se set kiya (OOM Crash nahi hoga)
+          # FIXED: Port 8006 open kiya taaki browser me live screen dikhe
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="13G" \
-            -e CPU_CORES="4" \
+            -e RAM_SIZE="10G" \
+            -e CPU_CORES="3" \
             -e DISK_SIZE="90G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
+            -p 8006:8006/tcp \
             -v /opt/windows:/storage \
             --device=/dev/kvm \
             --cap-add NET_ADMIN \
@@ -364,11 +366,10 @@ jobs:
           
           START_TIME=$(date +%s)
           TOTAL_SECONDS=19500
-          BACKUP_INTERVAL=4200  # <-- CHANGE HERE: 4200 seconds = 70 minutes
+          BACKUP_INTERVAL=4200
           LAST_BACKUP_TIME=$START_TIME
           WAS_CONNECTED=0
           
-          # <-- CHANGE HERE: Telegram message updated
           notify_telegram "🟢 Controller Active. Auto Double-Backups set for every 1 hour 10 mins (70 mins)."
           
           while true; do
@@ -391,7 +392,6 @@ jobs:
             
             ELAPSED_SINCE_BACKUP=$((CURRENT_TIME - LAST_BACKUP_TIME))
             if [ "$ELAPSED_SINCE_BACKUP" -ge "$BACKUP_INTERVAL" ]; then
-               # <-- CHANGE HERE: Reason string updated
                backup_now "70-Minute Auto Timer"
                LAST_BACKUP_TIME=$(date +%s)
                rm -f /tmp/skip_final_backup
