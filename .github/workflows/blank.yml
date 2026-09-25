@@ -271,19 +271,16 @@ jobs:
           fi
 
       # ============================================================
-      # STEP 8: START WINDOWS & RDP CHECK
+      # STEP 8: START WINDOWS & RDP CHECK (WITH ADVANCED LOGGING)
       # ============================================================
       - name: 🚀 Start Windows & RDP Check
         run: |
           NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🚀 Ab hum Step 8 (Start Windows & RDP Check) par badh rahe hain. Windows engine pull kiya ja raha hai..." > /dev/null || true
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🚀 Ab hum Step 8 (Start Windows & RDP Check) par badh rahe hain..." > /dev/null || true
           docker pull ghcr.io/dockur/windows
-          NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🪟 Windows image download ho gayi hai! Ab container boot kiya ja raha hai..." > /dev/null || true
           docker rm -f windows 2>/dev/null || true
           
-          # FIXED: RAM aur CPU ko GitHub limits ke hisab se set kiya (OOM Crash nahi hoga)
-          # FIXED: Port 8006 open kiya taaki browser me live screen dikhe
+          # Container ko start kar rahe hain
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
@@ -300,14 +297,31 @@ jobs:
             ghcr.io/dockur/windows
             
           NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ Container boot ho gaya hai! Ab Windows 11 load ho raha hai aur RDP port (3389) ka wait kiya ja raha hai (Isme 5-8 minute lag sakte hain, kripya thoda sabra karein)..." > /dev/null || true
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ Container boot ho gaya hai! RDP aur Port 8006 ka wait kiya ja raha hai..." > /dev/null || true
           
           READY=0
           STABLE_COUNT=0
           for i in $(seq 1 180); do
+            # 1. Check agar container crash ho gaya ho
+            if [ "$(docker inspect -f '{{.State.Running}}' windows 2>/dev/null)" != "true" ]; then
+              NOW=$(date '+%I:%M:%S %p')
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ❌ ALARM: Windows container crash ho gaya hai! GitHub logs check karein." > /dev/null || true
+              echo "❌ CONTAINER CRASHED! Pushing logs:"
+              docker logs windows --tail 100
+              break
+            fi
+
+            # 2. RDP Port 3389 Check
             RESPONSE=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3389; printf "\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00" >&3; head -c 4 <&3 | xxd -p' 2>/dev/null || true)
             if [ -n "$RESPONSE" ]; then STABLE_COUNT=$((STABLE_COUNT + 1)); else STABLE_COUNT=0; fi
             if [ "$STABLE_COUNT" -ge 2 ]; then READY=1; break; fi
+            
+            # 3. Har 1 minute me GitHub console me live logs print karo
+            if [ $((i % 6)) -eq 0 ]; then
+              echo "--- Live Docker Logs (Minute $((i / 6))) ---"
+              docker logs windows --tail 20
+            fi
+            
             sleep 10
           done
           
@@ -316,9 +330,10 @@ jobs:
           if [ "$READY" = "1" ]; then
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🖥️ Sir, Windows RDP 100% ready hai! Aap Tailscale IP (${TS_IP}) se RDP ke zariye connect kar sakte hain." > /dev/null || true
           else
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚠️ RDP check time le raha hai, lekin aap Tailscale IP (${TS_IP}) se try kar sakte hain." > /dev/null || true
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚠️ RDP 30 minute me start nahi hua. GitHub ke live logs check karein ki Windows kahan atka hai." > /dev/null || true
+            echo "--- FINAL DOCKER LOGS PUSH ---"
+            docker logs windows --tail 150
           fi
-
       # ============================================================
       # STEP 9: MAIN CONTROLLER & DETAILED MESSAGING LOOP
       # ============================================================
