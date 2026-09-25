@@ -271,36 +271,7 @@ jobs:
           fi
 
       # ============================================================
-      # STEP 7.5: ANALYZE BACKUP CORRUPTION (QEMU-IMG CHECK)
-      # ============================================================
-      - name: 🔍 Analyze Windows Virtual Disk Health
-        run: |
-          NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🔍 Sir, Backup file ki corruption check ki ja rahi hai..." > /dev/null || true
-          
-          sudo apt-get update && sudo apt-get install -y qemu-utils
-          
-          echo "--- 📂 /opt/windows ke andar ki files ---"
-          sudo ls -lh /opt/windows
-          
-          echo "--- 🩺 Virtual Disk Health Check ---"
-          DISK_FILE=$(sudo find /opt/windows -type f \( -name "*.qcow2" -o -name "*.img" -o -name "*.raw" \) | head -n 1)
-          
-          if [ -n "$DISK_FILE" ]; then
-            echo "Found Virtual Disk: $DISK_FILE"
-            if sudo qemu-img check "$DISK_FILE"; then
-              echo "✅ No corruption detected. Disk is healthy."
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Sir, aapki backup file 100% HEALTHY hai." > /dev/null || true
-            else
-              echo "⚠️ WARNING: VIRTUAL DISK CORRUPTION DETECTED!"
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ❌ ALARM: Sir, aapki virtual disk me corruption/dirty-state mila hai!" > /dev/null || true
-            fi
-          else
-            echo "ℹ️ Koi pre-existing virtual disk nahi mili (Fresh setup)."
-          fi
-
-      # ============================================================
-      # STEP 8: START WINDOWS & RDP CHECK (WITH ADVANCED DEBUGGING)
+      # STEP 8: START WINDOWS & RDP CHECK (FIXED DISK SIZE & RAM)
       # ============================================================
       - name: 🚀 Start Windows & RDP Check
         run: |
@@ -309,14 +280,14 @@ jobs:
           docker pull ghcr.io/dockur/windows
           docker rm -f windows 2>/dev/null || true
           
-          # Container with Port 8006 (Browser VNC) & Optimized RAM/CPU
+          # Container with Fixed RAM (8G) and Original Disk Size (100G)
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
             -e PASSWORD="${{ secrets.WINDOWS_PASSWORD }}" \
-            -e RAM_SIZE="10G" \
+            -e RAM_SIZE="8G" \
             -e CPU_CORES="3" \
-            -e DISK_SIZE="90G" \
+            -e DISK_SIZE="100G" \
             -p 3389:3389/tcp \
             -p 3389:3389/udp \
             -p 8006:8006/tcp \
