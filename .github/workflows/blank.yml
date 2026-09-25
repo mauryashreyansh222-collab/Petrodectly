@@ -36,7 +36,7 @@ jobs:
           echo "Checked out successfully"
 
       # ============================================================
-      # STEP 1.5: MAXIMIZE DISK SPACE 
+      # STEP 1.5: MAXIMIZE DISK SPACE
       # ============================================================
       - name: 🗑️ Maximize Disk Space
         run: |
@@ -271,7 +271,36 @@ jobs:
           fi
 
       # ============================================================
-      # STEP 8: START WINDOWS & RDP CHECK (WITH ADVANCED LOGGING)
+      # STEP 7.5: ANALYZE BACKUP CORRUPTION (QEMU-IMG CHECK)
+      # ============================================================
+      - name: 🔍 Analyze Windows Virtual Disk Health
+        run: |
+          NOW=$(date '+%I:%M:%S %p')
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🔍 Sir, Backup file ki corruption check ki ja rahi hai..." > /dev/null || true
+          
+          sudo apt-get update && sudo apt-get install -y qemu-utils
+          
+          echo "--- 📂 /opt/windows ke andar ki files ---"
+          sudo ls -lh /opt/windows
+          
+          echo "--- 🩺 Virtual Disk Health Check ---"
+          DISK_FILE=$(sudo find /opt/windows -type f \( -name "*.qcow2" -o -name "*.img" -o -name "*.raw" \) | head -n 1)
+          
+          if [ -n "$DISK_FILE" ]; then
+            echo "Found Virtual Disk: $DISK_FILE"
+            if sudo qemu-img check "$DISK_FILE"; then
+              echo "✅ No corruption detected. Disk is healthy."
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ✅ Sir, aapki backup file 100% HEALTHY hai." > /dev/null || true
+            else
+              echo "⚠️ WARNING: VIRTUAL DISK CORRUPTION DETECTED!"
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=$(date '+%I:%M:%S %p') : ❌ ALARM: Sir, aapki virtual disk me corruption/dirty-state mila hai!" > /dev/null || true
+            fi
+          else
+            echo "ℹ️ Koi pre-existing virtual disk nahi mili (Fresh setup)."
+          fi
+
+      # ============================================================
+      # STEP 8: START WINDOWS & RDP CHECK (WITH ADVANCED DEBUGGING)
       # ============================================================
       - name: 🚀 Start Windows & RDP Check
         run: |
@@ -280,7 +309,7 @@ jobs:
           docker pull ghcr.io/dockur/windows
           docker rm -f windows 2>/dev/null || true
           
-          # Container ko start kar rahe hain
+          # Container with Port 8006 (Browser VNC) & Optimized RAM/CPU
           docker run -d --name windows \
             -e VERSION="11" \
             -e USERNAME="admin" \
@@ -297,29 +326,29 @@ jobs:
             ghcr.io/dockur/windows
             
           NOW=$(date '+%I:%M:%S %p')
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ Container boot ho gaya hai! RDP aur Port 8006 ka wait kiya ja raha hai..." > /dev/null || true
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⏳ Container boot ho gaya hai! RDP (3389) aur Browser (8006) ka wait kiya ja raha hai..." > /dev/null || true
           
           READY=0
           STABLE_COUNT=0
           for i in $(seq 1 180); do
-            # 1. Check agar container crash ho gaya ho
+            # Check 1: Container crash detection
             if [ "$(docker inspect -f '{{.State.Running}}' windows 2>/dev/null)" != "true" ]; then
               NOW=$(date '+%I:%M:%S %p')
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ❌ ALARM: Windows container crash ho gaya hai! GitHub logs check karein." > /dev/null || true
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ❌ ALARM: Windows container crash ho gaya hai! GitHub logs dekhein." > /dev/null || true
               echo "❌ CONTAINER CRASHED! Pushing logs:"
               docker logs windows --tail 100
               break
             fi
 
-            # 2. RDP Port 3389 Check
+            # Check 2: RDP Port 3389 stability check
             RESPONSE=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3389; printf "\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00" >&3; head -c 4 <&3 | xxd -p' 2>/dev/null || true)
             if [ -n "$RESPONSE" ]; then STABLE_COUNT=$((STABLE_COUNT + 1)); else STABLE_COUNT=0; fi
             if [ "$STABLE_COUNT" -ge 2 ]; then READY=1; break; fi
             
-            # 3. Har 1 minute me GitHub console me live logs print karo
+            # Print live container logs every minute in GitHub Console
             if [ $((i % 6)) -eq 0 ]; then
               echo "--- Live Docker Logs (Minute $((i / 6))) ---"
-              docker logs windows --tail 20
+              docker logs windows --tail 25
             fi
             
             sleep 10
@@ -328,12 +357,13 @@ jobs:
           TS_IP=$(tailscale ip -4 2>/dev/null || echo "not available")
           NOW=$(date '+%I:%M:%S %p')
           if [ "$READY" = "1" ]; then
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🖥️ Sir, Windows RDP 100% ready hai! Aap Tailscale IP (${TS_IP}) se RDP ke zariye connect kar sakte hain." > /dev/null || true
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : 🖥️ Sir, Windows RDP 100% ready hai! Aap Tailscale IP (${TS_IP}) se connect kar sakte hain." > /dev/null || true
           else
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚠️ RDP 30 minute me start nahi hua. GitHub ke live logs check karein ki Windows kahan atka hai." > /dev/null || true
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" --data-urlencode "text=${NOW} : ⚠️ RDP start nahi hua. Browser me try karein: http://${TS_IP}:8006 ya GitHub logs check karein." > /dev/null || true
             echo "--- FINAL DOCKER LOGS PUSH ---"
             docker logs windows --tail 150
           fi
+
       # ============================================================
       # STEP 9: MAIN CONTROLLER & DETAILED MESSAGING LOOP
       # ============================================================
